@@ -1,0 +1,42 @@
+{
+  "name": "fe-build-cli",
+  "version": "1.2.4",
+  "description": "前端项目打包部署 CLI 工具，支持多服务器部署、分支管理、回滚、钉钉通知、智能处理本地改动等功能",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "fe-build": "src/cli.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./src/index.js",
+      "types": "./src/index.d.ts"
+    }
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "deploy",
+    "cli",
+    "frontend",
+    "build",
+    "ssh",
+    "git",
+    "dingtalk",
+    "stash"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "ssh2": "^1.15.0"
+  },
+  "devDependencies": {}
+}

@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>fe-build-cli 部署流程图</title>
+    <style>
+      :root {
+        --c-bg: #f8fafc;
+        --c-canvas: #ffffff;
+        --c-border: #cbd5e1;
+        --c-text-main: #0f172a;
+        --c-text-sub: #64748b;
+        --font-ui: system-ui, -apple-system, 'Segoe UI', sans-serif;
+        --font-mono: 'SF Mono', Monaco, Consolas, monospace;
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        background: var(--c-bg);
+        font-family: var(--font-ui);
+        color: var(--c-text-main);
+        padding: 40px;
+      }
+
+      .diagram-canvas {
+        background: var(--c-canvas);
+        border: 2px solid var(--c-border);
+        padding: 32px;
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+
+      .diagram-header {
+        border-bottom: 1px solid var(--c-border);
+        padding-bottom: 16px;
+        margin-bottom: 32px;
+      }
+
+      .diagram-title {
+        font-size: 24px;
+        font-weight: 600;
+        color: var(--c-text-main);
+      }
+
+      .diagram-subtitle {
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--c-text-sub);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-top: 4px;
+      }
+
+      .section {
+        margin-bottom: 48px;
+      }
+
+      .section-title {
+        font-size: 16px;
+        font-weight: 600;
+        color: var(--c-text-main);
+        margin-bottom: 16px;
+        padding-left: 12px;
+        border-left: 3px solid var(--c-text-main);
+      }
+
+      .flow-container {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .node {
+        background: var(--c-canvas);
+        border: 1px solid var(--c-border);
+        padding: 12px 16px;
+        min-width: 120px;
+        text-align: center;
+      }
+
+      .node--start {
+        border: 2px solid var(--c-text-main);
+        font-weight: 600;
+      }
+
+      .node--end {
+        background: var(--c-text-main);
+        color: var(--c-canvas);
+        font-weight: 600;
+      }
+
+      .node--action {
+        border: 1px solid var(--c-border);
+      }
+
+      .node--decision {
+        border: 1px solid var(--c-border);
+        padding: 8px 12px;
+        font-size: 12px;
+      }
+
+      .node-label {
+        font-size: 13px;
+        color: var(--c-text-main);
+      }
+
+      .node-sublabel {
+        font-size: 11px;
+        color: var(--c-text-sub);
+        margin-top: 4px;
+      }
+
+      .arrow {
+        font-size: 20px;
+        color: var(--c-text-sub);
+      }
+
+      .arrow-down {
+        display: flex;
+        justify-content: center;
+        padding: 8px 0;
+        color: var(--c-text-sub);
+      }
+
+      .badge {
+        display: inline-block;
+        font-size: 10px;
+        font-family: var(--font-mono);
+        padding: 2px 6px;
+        border: 1px solid var(--c-text-main);
+        text-transform: uppercase;
+        margin-top: 8px;
+      }
+
+      .badge--filled {
+        background: var(--c-text-main);
+        color: var(--c-canvas);
+      }
+
+      .step-number {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--c-text-sub);
+        margin-bottom: 4px;
+      }
+
+      .deploy-steps {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 16px;
+        margin-top: 24px;
+      }
+
+      .step-box {
+        border: 1px solid var(--c-border);
+        padding: 16px;
+      }
+
+      .step-box--current {
+        border-color: var(--c-text-main);
+        border-width: 2px;
+      }
+
+      .step-num {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        color: var(--c-text-sub);
+        margin-bottom: 8px;
+      }
+
+      .step-title {
+        font-size: 14px;
+        font-weight: 500;
+        color: var(--c-text-main);
+      }
+
+      .step-desc {
+        font-size: 12px;
+        color: var(--c-text-sub);
+        margin-top: 4px;
+      }
+
+      .mono {
+        font-family: var(--font-mono);
+        font-size: 13px;
+      }
+
+      .divider {
+        border-top: 1px dashed var(--c-border);
+        margin: 24px 0;
+      }
+
+      .branch-flow {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .branch-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .branch-label {
+        font-size: 12px;
+        color: var(--c-text-sub);
+        min-width: 80px;
+      }
+
+      .branch-node {
+        border: 1px solid var(--c-border);
+        padding: 8px 16px;
+        min-width: 100px;
+        text-align: center;
+        font-family: var(--font-mono);
+        font-size: 12px;
+      }
+
+      .branch-arrow {
+        color: var(--c-text-sub);
+        font-size: 16px;
+      }
+
+      .note {
+        font-size: 11px;
+        color: var(--c-text-sub);
+        padding: 8px 12px;
+        border-left: 2px solid var(--c-border);
+        margin-top: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="diagram-canvas">
+      <div class="diagram-header">
+        <h1 class="diagram-title">fe-build-cli 部署流程图</h1>
+        <p class="diagram-subtitle">DEPLOYMENT FLOW DIAGRAM</p>
+      </div>
+
+      <!-- 主分支发布模式 -->
+      <div class="section">
+        <h2 class="section-title">主分支发布模式 (deployMode: 'main')</h2>
+        
+        <div class="branch-flow">
+          <div class="branch-row">
+            <span class="branch-label">当前分支</span>
+            <div class="branch-node">feature/xxx</div>
+            <span class="branch-arrow">→</span>
+            <div class="branch-node">test</div>
+            <span class="branch-arrow">→</span>
+            <div class="branch-node">main</div>
+            <span class="branch-arrow">→</span>
+            <div class="branch-node">服务器部署</div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="flow-container">
+          <div class="node node--start">
+            <div class="node-label">开始</div>
+            <div class="badge">检查工作区</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 1</div>
+            <div class="node-label">切换到 test</div>
+            <div class="node-sublabel">git checkout test</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 2</div>
+            <div class="node-label">合并当前分支</div>
+            <div class="node-sublabel">git merge feature</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 3</div>
+            <div class="node-label">推送 test</div>
+            <div class="node-sublabel">git push origin test</div>
+          </div>
+        </div>
+
+        <div class="arrow-down">↓</div>
+
+        <div class="flow-container">
+          <div class="node node--action">
+            <div class="step-number">STEP 4</div>
+            <div class="node-label">切换到 main</div>
+            <div class="node-sublabel">git checkout main</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 5</div>
+            <div class="node-label">合并 test</div>
+            <div class="node-sublabel">git merge test</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 6</div>
+            <div class="node-label">推送 main</div>
+            <div class="node-sublabel">git push origin main</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 7</div>
+            <div class="node-label">构建项目</div>
+            <div class="node-sublabel">yarn build</div>
+          </div>
+        </div>
+
+        <div class="arrow-down">↓</div>
+
+        <div class="flow-container">
+          <div class="node node--action">
+            <div class="step-number">STEP 8</div>
+            <div class="node-label">SSH 连接</div>
+            <div class="node-sublabel">连接服务器</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 9</div>
+            <div class="node-label">上传部署</div>
+            <div class="node-sublabel">tar + sftp</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--end">
+            <div class="node-label">部署完成</div>
+          </div>
+        </div>
+
+        <div class="note">
+          适用场景：正式发布，需要经过测试分支验证。默认模式。
+        </div>
+      </div>
+
+      <!-- 当前分支发布模式 -->
+      <div class="section">
+        <h2 class="section-title">当前分支发布模式 (deployMode: 'current')</h2>
+        
+        <div class="branch-flow">
+          <div class="branch-row">
+            <span class="branch-label">当前分支</span>
+            <div class="branch-node">feature/xxx</div>
+            <span class="branch-arrow">→</span>
+            <div class="branch-node">服务器部署</div>
+            <span class="badge badge--filled">不切换分支</span>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="flow-container">
+          <div class="node node--start">
+            <div class="node-label">开始</div>
+            <div class="badge">获取当前分支</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 1</div>
+            <div class="node-label">构建项目</div>
+            <div class="node-sublabel">yarn build</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 2</div>
+            <div class="node-label">SSH 连接</div>
+            <div class="node-sublabel">连接服务器</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 3</div>
+            <div class="node-label">上传部署</div>
+            <div class="node-sublabel">tar + sftp</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--end">
+            <div class="node-label">部署完成</div>
+          </div>
+        </div>
+
+        <div class="note">
+          适用场景：快速测试、临时发布、开发调试。使用 --current-branch 参数。
+        </div>
+      </div>
+
+      <!-- 部署详细步骤 -->
+      <div class="section">
+        <h2 class="section-title">部署详细步骤 (8 步)</h2>
+        
+        <div class="deploy-steps">
+          <div class="step-box">
+            <div class="step-num">01</div>
+            <div class="step-title">构建项目</div>
+            <div class="step-desc">执行 buildCommand</div>
+          </div>
+          <div class="step-box">
+            <div class="step-num">02</div>
+            <div class="step-title">验证构建</div>
+            <div class="step-desc">检查 dist 目录</div>
+          </div>
+          <div class="step-box">
+            <div class="step-num">03</div>
+            <div class="step-title">压缩产物</div>
+            <div class="step-desc">tar -czf 打包</div>
+          </div>
+          <div class="step-box">
+            <div class="step-num">04</div>
+            <div class="step-title">备份旧版本</div>
+            <div class="step-desc">服务器端备份</div>
+          </div>
+          <div class="step-box">
+            <div class="step-num">05</div>
+            <div class="step-title">上传压缩包</div>
+            <div class="step-desc">SFTP 上传</div>
+          </div>
+          <div class="step-box">
+            <div class="step-num">06</div>
+            <div class="step-title">清理部署目录</div>
+            <div class="step-desc">保护 protectedDirs</div>
+          </div>
+          <div class="step-box">
+            <div class="step-num">07</div>
+            <div class="step-title">解压新版本</div>
+            <div class="step-desc">tar -xzf 解压</div>
+          </div>
+          <div class="step-box">
+            <div class="step-num">08</div>
+            <div class="step-title">清理临时文件</div>
+            <div class="step-desc">删除压缩包</div>
+          </div>
+        </div>
+
+        <div class="note">
+          步骤 06 会保护 protectedDirs 配置的目录，如 webgl、uploads 等。
+        </div>
+      </div>
+
+      <!-- 回滚流程 -->
+      <div class="section">
+        <h2 class="section-title">回滚流程</h2>
+        
+        <div class="flow-container">
+          <div class="node node--start">
+            <div class="node-label">开始回滚</div>
+            <div class="badge">指定环境</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 1</div>
+            <div class="node-label">SSH 连接</div>
+            <div class="node-sublabel">连接服务器</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 2</div>
+            <div class="node-label">获取备份</div>
+            <div class="node-sublabel">查找最新备份</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 3</div>
+            <div class="node-label">验证备份</div>
+            <div class="node-sublabel">检查文件存在</div>
+          </div>
+        </div>
+
+        <div class="arrow-down">↓</div>
+
+        <div class="flow-container">
+          <div class="node node--action">
+            <div class="step-number">STEP 4</div>
+            <div class="node-label">清理目录</div>
+            <div class="node-sublabel">保护 protectedDirs</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 5</div>
+            <div class="node-label">解压备份</div>
+            <div class="node-sublabel">tar -xzf</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--action">
+            <div class="step-number">STEP 6</div>
+            <div class="node-label">验证回滚</div>
+            <div class="node-sublabel">ls -la 检查</div>
+          </div>
+          <span class="arrow">→</span>
+          <div class="node node--end">
+            <div class="node-label">回滚完成</div>
+          </div>
+        </div>
+
+        <div class="note">
+          命令：fe-build rollback [环境] [--version 版本号]
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
