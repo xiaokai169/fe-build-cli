@@ -268,20 +268,23 @@ async function deployCommand(config) {
     }
   }
 
-  // 确定发布模式（根据部署环境自动选择）
-  let deployMode = config.deployMode || 'main'; // 默认主分支发布
+  // 确定发布模式
+  // 优先级：命令行参数 > 配置文件 deployMode > 自动识别
+  let deployMode = 'main'; // 默认值
 
-  // 命令行参数优先
+  // 1. 命令行参数优先
   if (useTestBranch) {
     deployMode = 'test';
   } else if (useCurrentBranch) {
     deployMode = 'current';
   } else if (useMainBranch) {
     deployMode = 'main';
+  } else if (config.deployMode) {
+    // 2. 使用配置文件的 deployMode
+    deployMode = config.deployMode;
+    console.log(`\n📌 使用配置文件发布模式: ${deployMode}`);
   } else {
-    // 自动根据部署环境选择发布模式
-    // test 环境 → test 发布模式
-    // production 环境 → main 发布模式
+    // 3. 自动根据部署环境选择发布模式（仅当配置文件未设置时）
     const targetEnv = selectedServers[0];
     if (targetEnv === 'test') {
       deployMode = 'test';
