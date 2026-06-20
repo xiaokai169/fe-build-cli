@@ -43,6 +43,7 @@ export async function sendDingTalkMessage(webhookUrl, message) {
  * @param {string} options.deployUrl - 部署后的访问地址
  * @param {string} options.branch - 分支名称
  * @param {string} options.deployMode - 发布模式
+ * @param {string} options.commitMessage - 提交信息（本次修改内容）
  * @param {string} options.duration - 部署耗时（可选）
  * @param {string} options.keyword - 安全关键词（可选）
  */
@@ -54,6 +55,7 @@ export async function sendDeploySuccessNotification(webhookUrl, options) {
     deployUrl,
     branch,
     deployMode,
+    commitMessage,
     duration,
     keyword = '部署'
   } = options;
@@ -71,6 +73,8 @@ export async function sendDeploySuccessNotification(webhookUrl, options) {
   // 标题必须包含关键词，否则钉钉会拒绝
   const title = `${keyword}成功 - ${environment}`;
 
+  const deployModeText = deployMode === 'main' ? '主分支发布' : deployMode === 'test' ? 'Test环境发布' : '当前分支发布';
+
   const message = {
     msgtype: 'markdown',
     markdown: {
@@ -86,13 +90,17 @@ export async function sendDeploySuccessNotification(webhookUrl, options) {
 
 ### ${keyword}详情
 
-| 项目 | 内容 |
-|:---:|:---|
-| 构建版本 | ${buildVersion} |
-| 发布分支 | ${branch} |
-| 发布模式 | ${deployMode === 'main' ? '主分支发布' : deployMode === 'test' ? 'Test环境发布' : '当前分支发布'} |
-| 服务器 | ${serverHost} |
-${duration ? `| ${keyword}耗时 | ${duration} |` : ''}
+构建版本: ${buildVersion}
+发布分支: ${branch}
+发布模式: ${deployModeText}
+服务器: ${serverHost}
+${duration ? `${keyword}耗时: ${duration}` : ''}
+
+---
+
+### 本次修改内容
+
+${commitMessage || '无提交信息'}
 
 ---
 
@@ -116,6 +124,7 @@ ${duration ? `| ${keyword}耗时 | ${duration} |` : ''}
  * @param {string} options.buildVersion - 构建版本
  * @param {string} options.serverHost - 服务器地址
  * @param {string} options.branch - 分支名称
+ * @param {string} options.commitMessage - 提交信息（本次修改内容）
  * @param {string} options.error - 错误信息
  * @param {string} options.keyword - 安全关键词（可选）
  */
@@ -125,6 +134,7 @@ export async function sendDeployFailureNotification(webhookUrl, options) {
     buildVersion,
     serverHost,
     branch,
+    commitMessage,
     error,
     keyword = '部署'
   } = options;
@@ -157,11 +167,15 @@ export async function sendDeployFailureNotification(webhookUrl, options) {
 
 ### 失败详情
 
-| 项目 | 内容 |
-|:---:|:---|
-| 构建版本 | ${buildVersion || '未完成'} |
-| 发布分支 | ${branch} |
-| 服务器 | ${serverHost} |
+构建版本: ${buildVersion || '未完成'}
+发布分支: ${branch}
+服务器: ${serverHost}
+
+---
+
+### 本次修改内容
+
+${commitMessage || '无提交信息'}
 
 ---
 
@@ -226,16 +240,16 @@ export async function sendRollbackNotification(webhookUrl, options) {
 
 ### 回滚详情
 
-| 项目 | 内容 |
-|:---:|:---|
-| 服务器 | ${serverHost} |
-| 备份文件 | ${backupFile} |
+服务器: ${serverHost}
+备份文件: ${backupFile}
 
 ---
 
 ${success ? `### 访问地址
 
-[${deployUrl}](${deployUrl})` : ''}
+[${deployUrl}](${deployUrl})` : `### 错误信息
+
+回滚失败，请检查备份文件是否存在或手动处理。`}
 
 > ${success ? '回滚完成，请验证功能是否正常。' : '回滚失败，请手动处理。'}（${keyword}系统）
       `.trim()

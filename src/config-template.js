@@ -80,5 +80,18 @@ export default {
     webhook: 'https://oapi.dingtalk.com/robot/send?access_token=your-token', // 钉钉机器人 webhook URL
     enabled: true,  // 是否启用钉钉通知，默认 true
     keyword: '部署'  // 安全设置关键词（如果机器人设置了关键词，必须配置此项）
-  }
+  },
+
+  /**
+   * 日志配置（可选）
+   * 部署日志存储目录，默认项目根目录下的 logs 目录
+   */
+  logDir: 'logs',
+
+  /**
+   * 本地备份目录（可选）
+   * 线上备份下载到本地的存储目录，默认 D:\备份
+   * 保留 7 天内的备份，自动清理旧备份
+   */
+  localBackupDir: 'D:\\备份'
 };

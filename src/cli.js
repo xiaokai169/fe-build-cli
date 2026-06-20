@@ -5,10 +5,12 @@ import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { deployToServer, rollbackDeployment } from './deploy-core.js';
+import { deployToServer, rollbackDeployment, getServerBackupList, getLocalBackupList, rollbackFromLocal } from './deploy-core.js';
+import SSHClient from './ssh-client.js';
 import {
   getCurrentBranch,
   getGitSha,
+  getGitCommitMessage,
   executeMainBranchFlow,
   executeCurrentBranchFlow,
   executeTestBranchFlow,
@@ -20,6 +22,8 @@ import {
   sendDeployFailureNotification,
   sendRollbackNotification
 } from './dingtalk.js';
+import { DeployLogger } from './logger.js';
+import { checkForUpdate, performUpdate, showUpdateInfo, getCurrentVersion } from './update.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -164,7 +168,11 @@ fe-build-cli - 前端项目打包部署工具
 
 命令:
   deploy [环境]     部署到指定环境（默认命令）
-  rollback [环境]   回滚到上一版本
+  rollback [环境]   回滚到指定版本（交互选择备份来源）
+  update            检查并更新到最新版本
+  update --force    自动更新（无需确认）
+  check-update      仅检查是否有新版本
+  version           显示当前版本号
   help              显示帮助信息
 
 选项:
@@ -176,6 +184,9 @@ fe-build-cli - 前端项目打包部署工具
   --no-merge         test 发布时不合并，使用 stash 储藏本地改动
   --skip-build       跳过构建步骤
   --no-push          发布时不推送到远程
+  --server           回滚时使用服务器备份（默认）
+  --local            回滚时使用本地备份
+  --version <版本号>  回滚到指定版本
 
 示例:
   fe-build                    # 交互式选择环境部署
@@ -186,7 +197,9 @@ fe-build-cli - 前端项目打包部署工具
   fe-build --test-branch --no-merge # test 发布，stash 储藏改动
   fe-build --current-branch   # 当前分支发布
   fe-build --main-branch      # 主分支发布流程
-  fe-build rollback production # 回滚生产环境
+  fe-build rollback production           # 回滚生产环境（交互选择）
+  fe-build rollback production --server  # 回滚生产环境（服务器备份）
+  fe-build rollback production --local   # 回滚生产环境（本地备份）
 
 配置文件 (fe-build.config.js):
   export default {
@@ -295,6 +308,12 @@ async function deployCommand(config) {
     }
   }
 
+  // 创建日志记录器（在分支操作之前）
+  const logDir = config.logDir || 'logs';
+  const localBackupDir = config.localBackupDir || 'D:\\备份';
+  const logger = new DeployLogger({ logDir, localBackupDir });
+  logger.start();
+
   // 执行分支发布流程
   let branchResult = null;
   let originalBranch = getCurrentBranch(); // 记录原始分支
@@ -320,7 +339,8 @@ async function deployCommand(config) {
         testBranch: branches.test,
         mergeChanges,
         pushToRemote: !noPush,
-        prompt
+        prompt,
+        logger  // 传递 logger
       });
       originalBranch = branchResult.originalBranch;
       needRestore = branchResult.needRestore;
@@ -339,19 +359,21 @@ async function deployCommand(config) {
       const confirmAnswer = await prompt('确认执行主分支发布流程? (y/n): ');
       if (confirmAnswer.toLowerCase() !== 'y') {
         console.log('已取消发布');
+        logger.end('cancelled');
         process.exit(0);
       }
 
       branchResult = executeMainBranchFlow({
         testBranch: branches.test,
         mainBranch: branches.main,
-        pushToRemote: !noPush
+        pushToRemote: !noPush,
+        logger  // 传递 logger
       });
       originalBranch = branchResult.originalBranch;
       needRestore = true;
     } else if (deployMode === 'current') {
       // 当前分支发布模式
-      branchResult = executeCurrentBranchFlow();
+      branchResult = executeCurrentBranchFlow(logger);
       originalBranch = branchResult.currentBranch;
       needRestore = false;
       console.log('📌 当前分支发布模式：不切换分支');
@@ -359,7 +381,10 @@ async function deployCommand(config) {
   } catch (branchError) {
     // 分支流程失败，发送钉钉通知
     console.error(`❌ 分支流程失败:`, branchError.message);
+    logger.log('ERROR', '分支流程失败', branchError.message);
+    logger.end('failed');
 
+    const commitMessage = getGitCommitMessage();
     if (config.dingtalk && config.dingtalk.enabled && config.dingtalk.webhook) {
       console.log('\n发送钉钉失败通知...');
       const envConfig = getServerConfig(config, selectedServers[0] || serverNames[0]);
@@ -368,13 +393,14 @@ async function deployCommand(config) {
         buildVersion: '未完成',
         serverHost: envConfig?.sshHost || '未知',
         branch: originalBranch,
+        commitMessage,
         error: `分支流程失败: ${branchError.message}`,
         keyword: config.dingtalk.keyword || '部署'
       });
     }
 
     // 切回原分支
-    restoreBranch(originalBranch, hasStash);
+    restoreBranch(originalBranch, hasStash, logger);
     process.exit(1);
   }
 
@@ -404,18 +430,25 @@ async function deployCommand(config) {
     }
     console.log('========================================');
 
+    // 部署到服务器（使用前面创建的 logger）
     try {
       await deployToServer({
         environment: serverName,
         envConfig,
         buildVersion,
         skipBuild: skipBuild || !isFirst,
-        skipLocalCleanup: i < selectedServers.length - 1
+        skipLocalCleanup: i < selectedServers.length - 1,
+        logger,
+        localBackupDir
       });
+
+      // 部署成功，结束日志记录
+      logger.end('success');
 
       // 部署成功，发送钉钉通知
       const duration = Math.round((Date.now() - startTime) / 1000);
       const currentBranch = getCurrentBranch();
+      const commitMessage = getGitCommitMessage();
 
       if (config.dingtalk && config.dingtalk.enabled && config.dingtalk.webhook) {
         console.log('\n发送钉钉通知...');
@@ -426,15 +459,21 @@ async function deployCommand(config) {
           deployUrl: envConfig.deployUrl,
           branch: currentBranch,
           deployMode,
+          commitMessage,
           duration: `${duration}秒`,
           keyword: config.dingtalk.keyword || '部署'
         });
+        logger.logDingTalk(true);
       }
     } catch (error) {
       console.error(`❌ 部署到 ${serverName} 失败:`, error.message);
 
+      // 部署失败，结束日志记录
+      logger.end('failed');
+
       // 部署失败，发送钉钉通知
       const currentBranch = getCurrentBranch();
+      const commitMessage = getGitCommitMessage();
       if (config.dingtalk && config.dingtalk.enabled && config.dingtalk.webhook) {
         console.log('\n发送钉钉失败通知...');
         await sendDeployFailureNotification(config.dingtalk.webhook, {
@@ -442,14 +481,16 @@ async function deployCommand(config) {
           buildVersion,
           serverHost: envConfig.sshHost,
           branch: currentBranch,
+          commitMessage,
           error: error.message,
           keyword: config.dingtalk.keyword || '部署'
         });
+        logger.logDingTalk(false, error.message);
       }
 
       // 出错时切回原分支
       if (needRestore && originalBranch) {
-        restoreBranch(originalBranch, hasStash);
+        restoreBranch(originalBranch, hasStash, logger);
       }
       process.exit(1);
     }
@@ -460,13 +501,13 @@ async function deployCommand(config) {
     // 合并模式：自动切回原分支
     if (autoRestore) {
       console.log('\n📌 自动切回原分支...');
-      restoreBranch(originalBranch, false);
+      restoreBranch(originalBranch, false, logger);
       console.log(`✅ 已切回 ${originalBranch}，可继续开发`);
     } else {
       // stash 模式：询问是否切回
       const returnAnswer = await prompt('\n是否切回原分支? (y/n): ');
       if (returnAnswer.toLowerCase() === 'y') {
-        restoreBranch(originalBranch, hasStash);
+        restoreBranch(originalBranch, hasStash, logger);
       } else if (hasStash) {
         console.log('\n💡 提示: 本地改动已储藏，执行以下命令恢复:');
         console.log('   git stash pop');
@@ -491,10 +532,12 @@ async function rollbackCommand(config) {
   const environment = args.find(arg => arg !== 'rollback' && !arg.startsWith('--'));
   const versionIndex = args.indexOf('--version');
   const specifiedVersion = versionIndex !== -1 ? args[versionIndex + 1] : undefined;
+  const useLocalBackup = args.includes('--local'); // 是否使用本地备份
+  const useServerBackup = args.includes('--server'); // 是否使用服务器备份
 
   if (!environment || !serverNames.includes(environment)) {
     console.error(`❌ 请指定服务器: ${serverNames.join(' 或 ')}`);
-    console.error(`用法: fe-build rollback [${serverNames.join('|')}] [--version <版本号>]`);
+    console.error(`用法: fe-build rollback [${serverNames.join('|')}] [--server|--local] [--version <版本号>]`);
     process.exit(1);
   }
 
@@ -505,22 +548,134 @@ async function rollbackCommand(config) {
     process.exit(1);
   }
 
+  // 创建日志记录器
+  const logDir = config.logDir || 'logs';
+  const localBackupDir = config.localBackupDir || 'D:\\备份';
+  const logger = new DeployLogger({ logDir, localBackupDir });
+  logger.start();
+
+  console.log('========================================');
+  console.log(`开始回滚 ${environment} 环境`);
+  console.log(`服务器: ${envConfig.sshHost}`);
+  console.log('========================================');
+
+  // 连接服务器
+  const ssh = new SSHClient(envConfig);
+  await ssh.connect();
+  logger.logSSHConnect(envConfig.sshHost, true);
+
   let backupFile = '';
-  let success = false;
+  let selectedBackup = null;
+  let backupSource = 'server'; // 默认服务器备份
 
   try {
-    // 执行回滚，获取备份文件信息
-    backupFile = specifiedVersion
-      ? `${envConfig.backupDir}/${envConfig.backupPrefix}-${specifiedVersion}.tar.gz`
-      : '';
+    // 如果指定了版本号，直接使用
+    if (specifiedVersion) {
+      backupFile = `${envConfig.backupDir}/${envConfig.backupPrefix}-${specifiedVersion}.tar.gz`;
+      console.log(`\n使用指定版本: ${specifiedVersion}`);
+      logger.log('INFO', '回滚版本', `指定版本: ${specifiedVersion}`);
+    } else {
+      // 获取备份列表
+      let serverBackups = [];
+      let localBackups = [];
 
+      // 获取服务器备份列表
+      console.log('\n[步骤 1] 获取服务器备份列表...');
+      serverBackups = await getServerBackupList(ssh, envConfig);
+      console.log(`找到 ${serverBackups.length} 个服务器备份`);
+
+      // 获取本地备份列表
+      console.log('\n[步骤 2] 获取本地备份列表...');
+      localBackups = getLocalBackupList(localBackupDir, envConfig.backupPrefix);
+      console.log(`找到 ${localBackups.length} 个本地备份`);
+
+      // 如果没有备份
+      if (serverBackups.length === 0 && localBackups.length === 0) {
+        logger.log('ERROR', '获取备份', '未找到任何备份文件');
+        console.error('❌ 未找到任何备份文件!');
+        await ssh.disconnect();
+        logger.end('failed');
+        process.exit(1);
+      }
+
+      // 确定备份来源
+      if (useLocalBackup && localBackups.length > 0) {
+        backupSource = 'local';
+      } else if (useServerBackup && serverBackups.length > 0) {
+        backupSource = 'server';
+      } else if (!useLocalBackup && !useServerBackup) {
+        // 交互选择备份来源（默认服务器）
+        console.log('\n========================================');
+        console.log('  📦 选择备份来源');
+        console.log('========================================');
+        console.log(`  1. 服务器备份 (${serverBackups.length} 个) - 默认`);
+        if (localBackups.length > 0) {
+          console.log(`  2. 本地备份 (${localBackups.length} 个)`);
+        }
+        console.log('========================================');
+
+        const sourceAnswer = await prompt(`请选择备份来源 (1${localBackups.length > 0 ? '/2' : ''}): `);
+        if (sourceAnswer === '2' && localBackups.length > 0) {
+          backupSource = 'local';
+        } else {
+          backupSource = 'server';
+        }
+      }
+
+      // 显示备份列表供选择
+      const backups = backupSource === 'server' ? serverBackups : localBackups;
+      
+      console.log(`\n========================================`);
+      console.log(`  📦 ${backupSource === 'server' ? '服务器' : '本地'}备份列表`);
+      console.log(`========================================`);
+      
+      backups.forEach((backup, index) => {
+        const sizeStr = backup.size ? ` (${formatFileSize(backup.size)})` : '';
+        const timeStr = backup.mtime ? ` - ${backup.mtime.toLocaleDateString('zh-CN')}` : '';
+        console.log(`  ${index + 1}. ${backup.version}${sizeStr}${timeStr}`);
+      });
+      console.log(`========================================`);
+
+      const backupAnswer = await prompt(`请选择要回滚的备份 (1-${backups.length}): `);
+      const selectedIndex = parseInt(backupAnswer, 10) - 1;
+
+      if (selectedIndex < 0 || selectedIndex >= backups.length) {
+        console.error('❌ 无效选择');
+        await ssh.disconnect();
+        logger.end('failed');
+        process.exit(1);
+      }
+
+      selectedBackup = backups[selectedIndex];
+      backupFile = selectedBackup.file;
+      
+      console.log(`\n已选择: ${selectedBackup.version}`);
+      logger.log('INFO', '选择备份', `来源: ${backupSource}, 版本: ${selectedBackup.version}`);
+    }
+
+    // 如果是本地备份，需要先上传到服务器
+    if (backupSource === 'local' && selectedBackup) {
+      const remoteFile = await rollbackFromLocal({
+        ssh,
+        envConfig,
+        localBackupFile: backupFile,
+        logger
+      });
+      backupFile = remoteFile;
+    }
+
+    // 执行回滚
     await rollbackDeployment({
       environment,
       envConfig,
-      specifiedVersion
+      specifiedVersion: specifiedVersion || (selectedBackup ? selectedBackup.version : undefined),
+      backupFile,
+      logger,
+      ssh // 传递已连接的 ssh
     });
 
-    success = true;
+    await ssh.disconnect();
+    logger.end('success');
 
     // 回滚成功，发送钉钉通知
     if (config.dingtalk && config.dingtalk.enabled && config.dingtalk.webhook) {
@@ -533,10 +688,18 @@ async function rollbackCommand(config) {
         success: true,
         keyword: config.dingtalk.keyword || '部署'
       });
+      logger.logDingTalk(true);
     }
   } catch (error) {
     console.error('❌ 回滚失败:', error.message);
-    success = false;
+    logger.log('ERROR', '回滚失败', error.message);
+    logger.end('failed');
+
+    try {
+      await ssh.disconnect();
+    } catch (e) {
+      // 忽略
+    }
 
     // 回滚失败，发送钉钉通知
     if (config.dingtalk && config.dingtalk.enabled && config.dingtalk.webhook) {
@@ -549,9 +712,39 @@ async function rollbackCommand(config) {
         success: false,
         keyword: config.dingtalk.keyword || '部署'
       });
+      logger.logDingTalk(false, error.message);
     }
 
     process.exit(1);
+  }
+}
+
+/**
+ * 格式化文件大小
+ */
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+}
+
+/**
+ * 启动时检查更新
+ */
+async function checkUpdateOnStart() {
+  try {
+    const info = await checkForUpdate();
+    if (info && info.hasUpdate) {
+      console.log('\n========================================');
+      console.log('  🔄 发现新版本');
+      console.log('========================================');
+      console.log(`当前版本: ${info.currentVersion}`);
+      console.log(`最新版本: ${info.latestVersion}`);
+      console.log('\n更新命令: fe-build update --force');
+      console.log('========================================\n');
+    }
+  } catch (error) {
+    // 检查更新失败，不影响主流程
   }
 }
 
@@ -567,6 +760,42 @@ async function main() {
     showHelp();
     process.exit(0);
   }
+
+  // 显示版本
+  if (command === 'version' || args.includes('--version') || args.includes('-v')) {
+    const version = getCurrentVersion();
+    console.log(`fe-build-cli v${version}`);
+    process.exit(0);
+  }
+
+  // 检查更新
+  if (command === 'check-update') {
+    await showUpdateInfo();
+    process.exit(0);
+  }
+
+  // 执行更新
+  if (command === 'update') {
+    const forceUpdate = args.includes('--force') || args.includes('--auto');
+    const info = await showUpdateInfo();
+    
+    if (info && info.hasUpdate) {
+      if (forceUpdate) {
+        // 自动更新，无需确认
+        await performUpdate(true);
+      } else {
+        // 交互确认
+        const answer = await prompt('\n是否立即更新? (y/n): ');
+        if (answer.toLowerCase() === 'y') {
+          await performUpdate(true);
+        }
+      }
+    }
+    process.exit(0);
+  }
+
+  // 其他命令启动时检查更新（静默检查）
+  await checkUpdateOnStart();
 
   // 加载配置
   const config = await loadConfig();

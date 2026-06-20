@@ -1,33 +1,161 @@
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
+import path from 'node:path';
 import process from 'node:process';
 import SSHClient from './ssh-client.js';
+import { DeployLogger, cleanLocalBackups } from './logger.js';
+
+/**
+ * 获取服务器备份列表
+ * @param {SSHClient} ssh - SSH 客户端
+ * @param {object} envConfig - 环境配置
+ * @returns {Promise<Array>} 备份文件列表
+ */
+export async function getServerBackupList(ssh, envConfig) {
+  const listCommand = `ls -t ${envConfig.backupDir}/${envConfig.backupPrefix}*.tar.gz 2>/dev/null`;
+  try {
+    const result = await ssh.execCommand(listCommand);
+    const files = result.trim().split('\n').filter(f => f.trim());
+    
+    // 解析文件名获取版本和时间信息
+    return files.map(file => {
+      const filename = path.basename(file);
+      // 提取版本号：backup-production-build-20260618-abc123.tar.gz
+      const match = filename.match(/^(.+)-build-(.+)\.tar\.gz$/);
+      if (match) {
+        return {
+          file,
+          filename,
+          prefix: match[1],
+          version: match[2],
+          isServer: true
+        };
+      }
+      return {
+        file,
+        filename,
+        version: filename.replace(/\.tar\.gz$/, ''),
+        isServer: true
+      };
+    });
+  } catch (error) {
+    return [];
+  }
+}
+
+/**
+ * 获取本地备份列表
+ * @param {string} localBackupDir - 本地备份目录
+ * @param {string} backupPrefix - 备份文件前缀
+ * @returns {Array} 备份文件列表
+ */
+export function getLocalBackupList(localBackupDir, backupPrefix) {
+  if (!fs.existsSync(localBackupDir)) {
+    return [];
+  }
+
+  const files = fs.readdirSync(localBackupDir);
+  const backupFiles = files.filter(f => 
+    f.endsWith('.tar.gz') && f.startsWith(backupPrefix)
+  );
+
+  // 按修改时间排序（最新的在前）
+  backupFiles.sort((a, b) => {
+    const statA = fs.statSync(path.join(localBackupDir, a));
+    const statB = fs.statSync(path.join(localBackupDir, b));
+    return statB.mtimeMs - statA.mtimeMs;
+  });
+
+  return backupFiles.map(filename => {
+    const filePath = path.join(localBackupDir, filename);
+    const stats = fs.statSync(filePath);
+    
+    // 提取版本号
+    const match = filename.match(/^(.+)-build-(.+)\.tar\.gz$/);
+    if (match) {
+      return {
+        file: filePath,
+        filename,
+        prefix: match[1],
+        version: match[2],
+        mtime: stats.mtime,
+        size: stats.size,
+        isServer: false
+      };
+    }
+    return {
+      file: filePath,
+      filename,
+      version: filename.replace(/\.tar\.gz$/, ''),
+      mtime: stats.mtime,
+      size: stats.size,
+      isServer: false
+    };
+  });
+}
+
+/**
+ * 从本地备份执行回滚（上传到服务器后回滚）
+ * @param {object} options - 回滚选项
+ */
+export async function rollbackFromLocal(options) {
+  const { ssh, envConfig, localBackupFile, logger } = options;
+  
+  console.log('\n[步骤] 上传本地备份到服务器...');
+  
+  const remoteFile = `${envConfig.backupDir}/${path.basename(localBackupFile)}`;
+  
+  try {
+    await ssh.uploadFile(localBackupFile, remoteFile);
+    logger.logUpload(localBackupFile, remoteFile, fs.statSync(localBackupFile).size, 0, true);
+    console.log('✅ 本地备份已上传到服务器');
+    
+    // 执行回滚
+    return remoteFile;
+  } catch (error) {
+    logger.logUpload(localBackupFile, remoteFile, 0, 0, false);
+    throw new Error(`上传本地备份失败: ${error.message}`);
+  }
+}
 
 /**
  * 构建项目
  * @param {object} envConfig - 环境配置
  * @param {string} buildVersion - 构建版本号
+ * @param {DeployLogger} logger - 日志记录器
  */
-export function buildProject(envConfig, buildVersion) {
+export function buildProject(envConfig, buildVersion, logger) {
   console.log('\n[步骤 1/8] 构建项目...');
   const buildMode = envConfig.buildMode || 'production';
   const buildCommand = envConfig.buildCommand || (buildMode === 'production' ? 'yarn build-only' : 'yarn build-test');
   console.log(`构建模式: ${buildMode} → ${buildCommand}`);
+  
+  const startTime = Date.now();
   process.env.VITE_APP_VERSION = buildVersion;
-  execSync(buildCommand, { stdio: 'inherit' });
-  console.log('✅ 构建完成');
+  
+  try {
+    execSync(buildCommand, { stdio: 'inherit' });
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    logger.logBuild(buildMode, buildVersion, true, duration);
+    console.log('✅ 构建完成');
+  } catch (error) {
+    logger.logBuild(buildMode, buildVersion, false, 0);
+    throw error;
+  }
 }
 
 /**
  * 验证构建输出
  * @param {boolean} skipBuild - 是否跳过构建
+ * @param {DeployLogger} logger - 日志记录器
  */
-export function verifyBuildOutput(skipBuild) {
+export function verifyBuildOutput(skipBuild, logger) {
   console.log(skipBuild ? '\n[步骤 1/7] 验证构建输出...' : '\n[步骤 2/8] 验证构建输出...');
   if (!fs.existsSync('dist')) {
-    console.error('❌ 构建目录不存在!');
+    logger.log('ERROR', '验证构建', '构建目录不存在');
     process.exit(1);
   }
+  logger.log('SUCCESS', '验证构建', '构建目录验证成功');
   console.log('✅ 验证完成');
 }
 
@@ -35,11 +163,20 @@ export function verifyBuildOutput(skipBuild) {
  * 压缩构建产物
  * @param {string} localZipFile - 本地压缩包路径
  * @param {boolean} skipBuild - 是否跳过构建
+ * @param {DeployLogger} logger - 日志记录器
  */
-export function compressBuild(localZipFile, skipBuild) {
+export function compressBuild(localZipFile, skipBuild, logger) {
   console.log(skipBuild ? '\n[步骤 2/7] 压缩本地构建产物...' : '\n[步骤 3/8] 压缩本地构建产物...');
-  execSync(`tar -czf ${localZipFile} -C dist .`, { stdio: 'inherit' });
-  console.log('✅ 压缩完成');
+  
+  try {
+    execSync(`tar -czf ${localZipFile} -C dist .`, { stdio: 'inherit' });
+    const stats = fs.statSync(localZipFile);
+    logger.logCompress(stats.size, true);
+    console.log('✅ 压缩完成');
+  } catch (error) {
+    logger.logCompress(0, false);
+    throw error;
+  }
 }
 
 /**
@@ -47,7 +184,7 @@ export function compressBuild(localZipFile, skipBuild) {
  * @param {object} options - 选项
  */
 export async function backupExistingDeployment(options) {
-  const { ssh, envConfig, buildVersion, skipBuild } = options;
+  const { ssh, envConfig, buildVersion, skipBuild, logger } = options;
   const stepNum = skipBuild ? '3' : '4';
   console.log(`\n[步骤 ${stepNum}/8] 备份现有部署...`);
   const backupFile = `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}.tar.gz`;
@@ -64,6 +201,7 @@ export async function backupExistingDeployment(options) {
     const protectedDirs = envConfig.protectedDirs || [];
     const excludeArgs = protectedDirs.map(d => `--exclude='./${d}'`).join(' ');
     await ssh.execCommand(`tar -czf ${backupFile} ${excludeArgs} -C ${envConfig.deployDir} .`);
+    logger.logBackup(backupFile, true);
     console.log('✅ 备份完成');
 
     await ssh.execCommand(
@@ -71,23 +209,33 @@ export async function backupExistingDeployment(options) {
     );
     console.log('✅ 清理旧备份完成');
   } else {
+    logger.log('INFO', '服务器备份', '部署目录为空或不存在,跳过备份');
     console.log('部署目录为空或不存在,跳过备份');
   }
 }
 
 /**
  * 上传构建产物
- * @param {SSHClient} ssh - SSH 客户端实例
- * @param {string} localZipFile - 本地压缩包路径
- * @param {string} remoteZipFile - 远程压缩包路径
- * @param {boolean} skipBuild - 是否跳过构建
+ * @param {object} options - 选项
  */
-export async function uploadBuild(ssh, localZipFile, remoteZipFile, skipBuild) {
+export async function uploadBuild(options) {
+  const { ssh, localZipFile, remoteZipFile, skipBuild, logger } = options;
   const stepNum = skipBuild ? '4' : '5';
   console.log(`\n[步骤 ${stepNum}/8] 上传压缩包...`);
-  await ssh.uploadFile(localZipFile, remoteZipFile);
-  await ssh.execCommand(`ls -lh ${remoteZipFile}`);
-  console.log('✅ 上传完成');
+  
+  const startTime = Date.now();
+  const stats = fs.statSync(localZipFile);
+  
+  try {
+    await ssh.uploadFile(localZipFile, remoteZipFile);
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    logger.logUpload(localZipFile, remoteZipFile, stats.size, duration, true);
+    await ssh.execCommand(`ls -lh ${remoteZipFile}`);
+    console.log('✅ 上传完成');
+  } catch (error) {
+    logger.logUpload(localZipFile, remoteZipFile, stats.size, 0, false);
+    throw error;
+  }
 }
 
 /**
@@ -95,7 +243,7 @@ export async function uploadBuild(ssh, localZipFile, remoteZipFile, skipBuild) {
  * @param {object} options - 选项
  */
 export async function deployAndExtract(options) {
-  const { ssh, envConfig, remoteZipFile, skipBuild } = options;
+  const { ssh, envConfig, remoteZipFile, skipBuild, logger } = options;
   const stepNum = skipBuild ? '5' : '6';
   console.log(`\n[步骤 ${stepNum}/8] 清理并解压新版本...`);
 
@@ -117,8 +265,14 @@ export async function deployAndExtract(options) {
   }
 
   // 解压新版本
-  await ssh.execCommand(`tar -xzf ${remoteZipFile} -C ${envConfig.deployDir}`);
-  console.log('✅ 清理并解压完成');
+  try {
+    await ssh.execCommand(`tar -xzf ${remoteZipFile} -C ${envConfig.deployDir}`);
+    logger.logDeploy(envConfig.deployDir, true);
+    console.log('✅ 清理并解压完成');
+  } catch (error) {
+    logger.logDeploy(envConfig.deployDir, false);
+    throw error;
+  }
 }
 
 /**
@@ -126,14 +280,63 @@ export async function deployAndExtract(options) {
  * @param {object} options - 选项
  */
 export async function cleanupFiles(options) {
-  const { ssh, remoteZipFile, localZipFile, skipLocalCleanup, skipBuild } = options;
+  const { ssh, remoteZipFile, localZipFile, skipLocalCleanup, skipBuild, logger } = options;
   const stepNum = skipBuild ? '6' : '7';
   console.log(`\n[步骤 ${stepNum}/8] 删除压缩包...`);
-  await ssh.execCommand(`rm -f ${remoteZipFile}`);
-  if (!skipLocalCleanup) {
-    fs.unlinkSync(localZipFile);
+  
+  try {
+    await ssh.execCommand(`rm -f ${remoteZipFile}`);
+    if (!skipLocalCleanup) {
+      fs.unlinkSync(localZipFile);
+    }
+    logger.log('SUCCESS', '清理临时文件', '压缩包已删除');
+    console.log('✅ 删除完成');
+  } catch (error) {
+    logger.log('WARN', '清理临时文件', '删除压缩包失败,但不影响部署');
+    console.warn('⚠️  删除压缩包失败,但不影响部署');
   }
-  console.log('✅ 删除完成');
+}
+
+/**
+ * 下载线上备份到本地
+ * @param {object} options - 选项
+ */
+export async function downloadBackup(options) {
+  const { ssh, envConfig, buildVersion, localBackupDir, logger } = options;
+  
+  console.log('\n[步骤] 下载线上备份到本地...');
+  
+  // 确保本地备份目录存在
+  if (!fs.existsSync(localBackupDir)) {
+    fs.mkdirSync(localBackupDir, { recursive: true });
+  }
+  
+  const remoteBackupFile = `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}.tar.gz`;
+  const localBackupFile = path.join(localBackupDir, `${envConfig.backupPrefix}-${buildVersion}.tar.gz`);
+  
+  // 检查远程备份文件是否存在
+  const checkCommand = `test -f '${remoteBackupFile}' && echo 'FILE_YES' || echo 'FILE_NO'`;
+  const exists = await ssh.execCommand(checkCommand);
+  
+  if (!exists.includes('FILE_YES')) {
+    logger.log('WARN', '备份下载', '远程备份文件不存在');
+    console.log('⚠️ 远程备份文件不存在，跳过下载');
+    return null;
+  }
+  
+  try {
+    await ssh.downloadFile(remoteBackupFile, localBackupFile);
+    logger.logBackup(localBackupFile, true, true);
+    
+    // 清理本地旧备份（保留7天）
+    cleanLocalBackups(localBackupDir, 7);
+    
+    return localBackupFile;
+  } catch (error) {
+    logger.logBackup(remoteBackupFile, false, true);
+    console.error('❌ 下载备份失败:', error.message);
+    return null;
+  }
 }
 
 /**
@@ -144,29 +347,33 @@ export async function cleanupFiles(options) {
  * @param {string} options.buildVersion - 构建版本
  * @param {boolean} options.skipBuild - 是否跳过构建
  * @param {boolean} options.skipLocalCleanup - 是否跳过本地清理
+ * @param {DeployLogger} options.logger - 日志记录器
+ * @param {string} options.localBackupDir - 本地备份目录
  */
 export async function deployToServer(options) {
-  const { environment, envConfig, buildVersion, skipBuild = false, skipLocalCleanup = false } = options;
+  const { environment, envConfig, buildVersion, skipBuild = false, skipLocalCleanup = false, logger, localBackupDir } = options;
 
   const localZipFile = `dist-${buildVersion}.tar.gz`;
   const remoteZipFile = `${envConfig.backupDir}/${localZipFile}`;
 
   if (!skipBuild) {
-    buildProject(envConfig, buildVersion);
+    buildProject(envConfig, buildVersion, logger);
   }
 
-  verifyBuildOutput(skipBuild);
-  compressBuild(localZipFile, skipBuild);
+  verifyBuildOutput(skipBuild, logger);
+  compressBuild(localZipFile, skipBuild, logger);
 
   const ssh = new SSHClient(envConfig);
 
   try {
     await ssh.connect();
-    await backupExistingDeployment({ ssh, envConfig, buildVersion, skipBuild });
-    await uploadBuild(ssh, localZipFile, remoteZipFile, skipBuild);
+    logger.logSSHConnect(envConfig.sshHost, true);
+    
+    await backupExistingDeployment({ ssh, envConfig, buildVersion, skipBuild, logger });
+    await uploadBuild({ ssh, localZipFile, remoteZipFile, skipBuild, logger });
 
     try {
-      await deployAndExtract({ ssh, envConfig, remoteZipFile, skipBuild });
+      await deployAndExtract({ ssh, envConfig, remoteZipFile, skipBuild, logger });
     } catch (error) {
       console.error('❌ 清理或解压失败!');
       await ssh.disconnect();
@@ -174,9 +381,14 @@ export async function deployToServer(options) {
     }
 
     try {
-      await cleanupFiles({ ssh, remoteZipFile, localZipFile, skipLocalCleanup, skipBuild });
+      await cleanupFiles({ ssh, remoteZipFile, localZipFile, skipLocalCleanup, skipBuild, logger });
     } catch (error) {
       console.warn('⚠️  删除压缩包失败,但不影响部署');
+    }
+
+    // 下载线上备份到本地
+    if (localBackupDir) {
+      await downloadBackup({ ssh, envConfig, buildVersion, localBackupDir, logger });
     }
 
     await ssh.disconnect();
@@ -192,8 +404,11 @@ export async function deployToServer(options) {
     console.log(`服务器: ${envConfig.sshHost}`);
     console.log(`地址: ${envConfig.deployUrl}`);
     console.log('========================================');
+    
+    logger.log('SUCCESS', '部署完成', `环境: ${environment}, 版本: ${buildVersion}`);
   } catch (error) {
     console.error('部署失败:', error);
+    logger.log('ERROR', '部署失败', error.message);
     await ssh.disconnect();
     throw error;
   }
@@ -205,54 +420,69 @@ export async function deployToServer(options) {
  * @param {string} options.environment - 环境名称
  * @param {object} options.envConfig - 环境配置
  * @param {string} options.specifiedVersion - 指定版本（可选）
+ * @param {string} options.backupFile - 备份文件路径（可选，已选择）
+ * @param {SSHClient} options.ssh - SSH 客户端（可选，已连接）
+ * @param {DeployLogger} options.logger - 日志记录器
  */
 export async function rollbackDeployment(options) {
-  const { environment, envConfig, specifiedVersion } = options;
+  const { environment, envConfig, specifiedVersion, backupFile, ssh: existingSsh, logger } = options;
 
   console.log('========================================');
   console.log(`开始回滚 ${environment} 环境`);
   console.log(`服务器: ${envConfig.sshHost}`);
   console.log('========================================');
 
-  const ssh = new SSHClient(envConfig);
+  // 使用已连接的 ssh 或创建新连接
+  const ssh = existingSsh || new SSHClient(envConfig);
+  let needDisconnect = !existingSsh;
 
   try {
-    await ssh.connect();
+    if (!existingSsh) {
+      await ssh.connect();
+      logger.logSSHConnect(envConfig.sshHost, true);
+    }
 
     console.log('\n[步骤 1/4] 获取备份文件...');
 
-    let backupFile;
-    if (specifiedVersion) {
-      backupFile = `${envConfig.backupDir}/${envConfig.backupPrefix}-${specifiedVersion}.tar.gz`;
-      console.log(`使用指定版本: ${specifiedVersion}`);
-    } else {
-      const listCommand = `ls -t ${envConfig.backupDir}/${envConfig.backupPrefix}*.tar.gz 2>/dev/null | head -n 1`;
-      try {
-        const listResult = await ssh.execCommand(listCommand);
-        backupFile = listResult.trim();
+    let finalBackupFile = backupFile;
+    if (!finalBackupFile) {
+      if (specifiedVersion) {
+        finalBackupFile = `${envConfig.backupDir}/${envConfig.backupPrefix}-${specifiedVersion}.tar.gz`;
+        console.log(`使用指定版本: ${specifiedVersion}`);
+      } else {
+        const listCommand = `ls -t ${envConfig.backupDir}/${envConfig.backupPrefix}*.tar.gz 2>/dev/null | head -n 1`;
+        try {
+          const listResult = await ssh.execCommand(listCommand);
+          finalBackupFile = listResult.trim();
 
-        if (!backupFile) {
-          console.error('❌ 未找到备份文件!');
-          await ssh.disconnect();
+          if (!finalBackupFile) {
+            logger.log('ERROR', '获取备份', '未找到备份文件');
+            console.error('❌ 未找到备份文件!');
+            if (needDisconnect) await ssh.disconnect();
+            process.exit(1);
+          }
+          console.log(`找到最新备份: ${finalBackupFile}`);
+          logger.log('SUCCESS', '获取备份', `找到最新备份: ${finalBackupFile}`);
+        } catch (error) {
+          logger.log('ERROR', '获取备份', '获取备份文件失败');
+          console.error('❌ 获取备份文件失败!');
+          if (needDisconnect) await ssh.disconnect();
           process.exit(1);
         }
-        console.log(`找到最新备份: ${backupFile}`);
-      } catch (error) {
-        console.error('❌ 获取备份文件失败!');
-        await ssh.disconnect();
-        process.exit(1);
       }
     }
 
     console.log('\n[步骤 2/4] 验证备份文件...');
-    const checkCommand = `test -f '${backupFile}' && echo 'FILE_YES' || echo 'FILE_NO'`;
+    const checkCommand = `test -f '${finalBackupFile}' && echo 'FILE_YES' || echo 'FILE_NO'`;
     const exists = await ssh.execCommand(checkCommand);
 
     if (!exists.includes('FILE_YES')) {
-      console.error(`❌ 备份文件不存在: ${backupFile}`);
-      await ssh.disconnect();
+      logger.log('ERROR', '验证备份', `备份文件不存在: ${finalBackupFile}`);
+      console.error(`❌ 备份文件不存在: ${finalBackupFile}`);
+      if (needDisconnect) await ssh.disconnect();
       process.exit(1);
     }
+    logger.log('SUCCESS', '验证备份', '备份文件验证完成');
     console.log('✅ 备份文件验证完成');
 
     const protectedDirs = envConfig.protectedDirs || [];
@@ -275,14 +505,16 @@ export async function rollbackDeployment(options) {
 
       if (protectedDirs.length > 0) {
         const excludeArgs = protectedDirs.map(d => `--exclude='./${d}'`).join(' ');
-        await ssh.execCommand(`tar -xzf ${backupFile} ${excludeArgs} -C ${envConfig.deployDir}`);
+        await ssh.execCommand(`tar -xzf ${finalBackupFile} ${excludeArgs} -C ${envConfig.deployDir}`);
       } else {
-        await ssh.execCommand(`tar -xzf ${backupFile} -C ${envConfig.deployDir}`);
+        await ssh.execCommand(`tar -xzf ${finalBackupFile} -C ${envConfig.deployDir}`);
       }
+      logger.logDeploy(envConfig.deployDir, true);
       console.log('✅ 回滚成功');
     } catch (error) {
+      logger.logDeploy(envConfig.deployDir, false);
       console.error('❌ 回滚失败!');
-      await ssh.disconnect();
+      if (needDisconnect) await ssh.disconnect();
       process.exit(1);
     }
 
@@ -291,24 +523,37 @@ export async function rollbackDeployment(options) {
       const verifyResult = await ssh.execCommand(`ls -la ${envConfig.deployDir} | head -n 20`);
       console.log('=== 验证回滚后的文件 ===');
       console.log(verifyResult);
+      logger.log('SUCCESS', '验证回滚', '验证完成');
       console.log('✅ 验证完成');
     } catch (error) {
+      logger.log('ERROR', '验证回滚', '验证失败');
       console.error('❌ 验证失败!');
-      await ssh.disconnect();
+      if (needDisconnect) await ssh.disconnect();
       process.exit(1);
     }
 
-    await ssh.disconnect();
+    if (needDisconnect) {
+      await ssh.disconnect();
+    }
 
     console.log('\n========================================');
     console.log('✅ 回滚成功完成!');
     console.log(`环境: ${environment}`);
     console.log(`服务器: ${envConfig.sshHost}`);
-    console.log(`备份文件: ${backupFile}`);
+    console.log(`备份文件: ${finalBackupFile}`);
     console.log('========================================');
+    
+    logger.log('SUCCESS', '回滚完成', `备份文件: ${finalBackupFile}`);
   } catch (error) {
     console.error('回滚失败:', error);
-    await ssh.disconnect();
+    logger.log('ERROR', '回滚失败', error.message);
+    if (needDisconnect) {
+      try {
+        await ssh.disconnect();
+      } catch (e) {
+        // 忽略
+      }
+    }
     throw error;
   }
 }
@@ -321,6 +566,7 @@ export default {
   uploadBuild,
   deployAndExtract,
   cleanupFiles,
+  downloadBackup,
   deployToServer,
   rollbackDeployment
 };

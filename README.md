@@ -5,10 +5,15 @@
 ## 功能特性
 
 - ✅ 多服务器环境部署
-- ✅ 两种发布模式：主分支发布 / 当前分支发布
+- ✅ 三种发布模式：主分支发布 / 当前分支发布 / Test 环境发布
 - ✅ Git 分支自动合并流程
+- ✅ 智能处理本地改动（自动提交或 stash 储藏）
 - ✅ SSH 远程部署（带进度条）
 - ✅ 自动备份与回滚
+- ✅ 线上备份下载到本地（保留 7 天）
+- ✅ 详细日志记录（每一步操作及状态）
+- ✅ 错误日志单独保存
+- ✅ 钉钉通知（成功/失败）
 - ✅ 保护目录（部署时不删除指定目录）
 - ✅ TypeScript 类型支持
 
@@ -106,9 +111,12 @@ fe-build [deploy] [环境] [选项]
 | `环境` | 目标环境名称（如 production、test），或 `all` 部署到所有环境 |
 | `--config <路径>` | 指定配置文件路径 |
 | `--current-branch` | 使用当前分支发布（不切换分支） |
+| `--test-branch` | 使用 Test 环境发布流程（智能处理本地改动） |
+| `--merge` | Test 发布时合并本地改动 |
+| `--no-merge` | Test 发布时使用 stash 储藏改动 |
 | `--main-branch` | 使用主分支发布流程 |
 | `--skip-build` | 跳过构建步骤 |
-| `--no-push` | 主分支发布时不推送到远程 |
+| `--no-push` | 发布时不推送到远程 |
 
 **示例：**
 
@@ -121,6 +129,15 @@ fe-build deploy production
 
 # 当前分支发布（不切换分支）
 fe-build --current-branch
+
+# Test 环境发布（智能处理本地改动）
+fe-build --test-branch
+
+# Test 发布，合并本地改动
+fe-build --test-branch --merge
+
+# Test 发布，stash 储藏改动
+fe-build --test-branch --no-merge
 
 # 主分支发布流程
 fe-build --main-branch
@@ -135,23 +152,121 @@ fe-build --config ./custom-config.js
 ### rollback（回滚）
 
 ```bash
-fe-build rollback [环境] [--version <版本号>]
+fe-build rollback [环境] [--server|--local] [--version <版本号>]
 ```
 
 | 参数 | 说明 |
 |------|------|
 | `环境` | 目标环境名称 |
-| `--version <版本号>` | 指定回滚版本（可选，默认回滚到上一版本） |
+| `--server` | 使用服务器备份（默认） |
+| `--local` | 使用本地备份 |
+| `--version <版本号>` | 指定回滚版本（可选） |
+
+**回滚流程：**
+
+1. 获取备份列表（服务器和本地）
+2. 选择备份来源（默认服务器）
+3. 从备份列表中选择要回滚的版本
+4. 执行回滚
 
 **示例：**
 
 ```bash
-# 回滚生产环境到上一版本
+# 回滚生产环境（交互选择备份来源和版本）
 fe-build rollback production
+
+# 回滚生产环境（使用服务器备份）
+fe-build rollback production --server
+
+# 回滚生产环境（使用本地备份）
+fe-build rollback production --local
 
 # 回滚到指定版本
 fe-build rollback production --version build-20240101-abc123
 ```
+
+**备份列表显示：**
+
+```
+========================================
+  📦 选择备份来源
+========================================
+  1. 服务器备份 (5 个) - 默认
+  2. 本地备份 (3 个)
+========================================
+请选择备份来源 (1/2): 1
+
+========================================
+  📦 服务器备份列表
+========================================
+  1. 20260618-abc123 (12.5 MB) - 2026/6/18
+  2. 20260617-def456 (11.8 MB) - 2026/6/17
+  3. 20260616-ghi789 (10.2 MB) - 2026/6/16
+========================================
+请选择要回滚的备份 (1-3): 
+```
+
+### update（更新）
+
+```bash
+fe-build update [--force|--auto]
+fe-build check-update
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--force` | 自动更新，无需确认 |
+| `--auto` | 自动更新，无需确认（同 --force） |
+
+**功能说明：**
+
+- `update` - 检查并更新到最新版本（交互确认）
+- `update --force` - 自动更新，无需确认
+- `check-update` - 仅检查是否有新版本
+
+**示例：**
+
+```bash
+# 检查并更新（需要确认）
+fe-build update
+
+# 自动更新（无需确认）
+fe-build update --force
+fe-build update --auto
+
+# 仅检查是否有更新
+fe-build check-update
+
+# 手动更新（推荐）
+npm update fe-build-cli --global
+```
+
+**更新输出示例：**
+
+```
+========================================
+  🔄 fe-build-cli 版本检查
+========================================
+当前版本: 1.5.0
+最新版本: 1.6.0
+
+📌 发现新版本!
+
+更新方法:
+  fe-build update          # 自动更新
+  npm update fe-build-cli --global  # 手动更新
+========================================
+```
+
+### version（版本）
+
+```bash
+fe-build version
+fe-build --version
+fe-build -v
+```
+
+显示当前安装的版本号。
 
 ### help（帮助）
 
@@ -163,7 +278,7 @@ fe-build -h
 
 ## 发布模式详解
 
-### 主分支发布模式（默认）
+### 主分支发布模式
 
 流程：当前分支 → 测试分支 → 主分支 → 部署
 
@@ -185,7 +300,49 @@ fe-build -h
 6. 合并测试分支到主分支
 7. 推送主分支到远程
 8. 执行构建和部署
-9. 可选择切回原分支
+9. 自动切回原分支
+
+### Test 环境发布模式（智能处理本地改动）
+
+流程：智能处理本地改动 → Test 分支 → 部署
+
+**适用场景：** 发布到 Test 环境，自动处理本地未提交的改动
+
+**智能处理策略：**
+
+| 情况 | 处理方式 |
+|------|---------|
+| 当前已在 test 分支 | 直接拉取最新代码，无需切换 |
+| 当前分支 ≠ test，无本地改动 | 直接切换到 test 分支发布 |
+| 当前分支 ≠ test，有本地改动 | 选择合并或 stash |
+
+**有本地改动时的选项：**
+
+1. **合并改动**（`--merge`）：
+   - 自动提交当前分支改动
+   - 推送当前分支到远程
+   - 切换到 test 分支
+   - 合并当前分支到 test
+   - 推送 test 分支
+   - 部署完成后自动切回原分支
+
+2. **Stash 储藏**（`--no-merge`）：
+   - 储藏本地改动
+   - 切换到 test 分支发布
+   - 部署完成后询问是否切回原分支
+   - 切回后自动恢复 stash
+
+**示例：**
+```bash
+# Test 环境发布（交互选择处理方式）
+fe-build --test-branch
+
+# Test 发布，合并本地改动
+fe-build --test-branch --merge
+
+# Test 发布，stash 储藏改动
+fe-build --test-branch --no-merge
+```
 
 ### 当前分支发布模式
 
@@ -248,10 +405,15 @@ export default {
   // 备份保留数量（可选，默认 1）
   backupRetentionCount: 3,
 
+  // 日志配置（可选）
+  logDir: 'logs',           // 日志目录，默认 'logs'
+  localBackupDir: 'D:\\备份', // 本地备份目录，默认 'D:\备份'
+
   // 钉钉通知配置（可选）
   dingtalk: {
     webhook: 'https://oapi.dingtalk.com/robot/send?access_token=your-token', // 钉钉机器人 webhook
-    enabled: true  // 是否启用通知，默认 true
+    keyword: '部署',         // 安全设置关键词（可选）
+    enabled: true            // 是否启用通知，默认 true
   }
 };
 ```
@@ -276,7 +438,10 @@ export default {
 | `servers[key].buildCommand` | string | 否 | 自定义构建命令 |
 | `servers[key].protectedDirs` | string[] | 否 | 保护目录列表 |
 | `backupRetentionCount` | number | 否 | 备份保留数量，默认 1 |
+| `logDir` | string | 否 | 日志目录，默认 'logs' |
+| `localBackupDir` | string | 否 | 本地备份目录，默认 'D:\备份' |
 | `dingtalk.webhook` | string | 否 | 钉钉机器人 webhook URL |
+| `dingtalk.keyword` | string | 否 | 安全设置关键词 |
 | `dingtalk.enabled` | boolean | 否 | 是否启用通知，默认 true |
 
 ## 钉钉通知
@@ -308,15 +473,149 @@ dingtalk: {
 
 环境: production
 状态: ✅ 成功
-时间: 2024-01-01 10:30:00
+时间: 2026/06/18 10:30:00
 
-构建版本: build-20240101-abc123
+---
+
+### 部署详情
+
+构建版本: build-20260618-abc123
 发布分支: main
 发布模式: 主分支发布
-服务器: your-server-ip
+服务器: your-server.com
 部署耗时: 120秒
 
-访问地址: https://www.example.com
+---
+
+### 本次修改内容
+
+feat: 新增用户管理模块
+
+---
+
+### 访问地址
+
+https://www.example.com
+
+> 部署完成，请及时验证功能是否正常。
+```
+
+部署失败通知：
+
+```
+❌ 部署失败通知
+
+环境: production
+状态: ❌ 失败
+时间: 2026/06/18 10:30:00
+
+---
+
+### 失败详情
+
+构建版本: build-20260618-abc123
+发布分支: main
+服务器: your-server.com
+
+---
+
+### 本次修改内容
+
+feat: 新增用户管理模块
+
+---
+
+### 错误信息
+
+SSH 连接失败: Connection refused
+
+> 请及时排查问题并重新部署。
+```
+
+## 日志记录
+
+每次部署都会自动记录详细的操作日志，包括每一步的执行状态。
+
+### 日志内容
+
+日志记录以下操作：
+
+| 操作类型 | 记录内容 |
+|---------|---------|
+| 分支操作 | 切换分支（从哪个分支切换到哪个分支） |
+| 代码合并 | 源分支→目标分支，是否有冲突 |
+| Stash 操作 | 储藏/恢复本地改动 |
+| 项目构建 | 构建模式、版本号、耗时 |
+| 文件压缩 | 压缩包大小 |
+| SSH 连接 | 服务器地址、连接状态 |
+| 文件上传 | 本地路径、远程路径、大小、耗时、速度 |
+| 备份操作 | 服务器备份/本地下载 |
+| 部署解压 | 部署目录 |
+| 钉钉通知 | 发送成功/失败 |
+
+### 日志文件
+
+**存储位置**：`logs` 目录（可通过 `logDir` 配置）
+
+**文件格式**：
+```
+deploy-2026-06-18-10-30-45-success.json  # 成功日志
+deploy-2026-06-18-10-30-45-failed.json   # 失败日志
+error-2026-06-18-10-30-45.json           # 错误日志（单独保存）
+```
+
+**日志内容示例**：
+```json
+{
+  "summary": {
+    "startTime": "2026/06/18 10:30:45",
+    "endTime": "2026/06/18 10:35:20",
+    "duration": 275,
+    "status": "success",
+    "totalSteps": 15,
+    "successSteps": 15,
+    "failedSteps": 0
+  },
+  "logs": [
+    {
+      "timestamp": "2026/06/18 10:30:45",
+      "level": "SUCCESS",
+      "step": "分支操作",
+      "message": "切换分支: feature-xxx → test, 成功",
+      "data": { "action": "切换分支", "fromBranch": "feature-xxx", "toBranch": "test" }
+    }
+    // ... 更多日志
+  ]
+}
+```
+
+### 错误日志
+
+部署失败时，错误日志会单独保存一份，便于快速定位问题：
+- 包含完整的错误信息
+- 包含所有操作日志
+- 文件名以 `error-` 开头
+
+## 线上备份下载
+
+部署完成后，线上备份会自动下载到本地保存。
+
+### 配置
+
+```javascript
+// 本地备份目录（默认：D:\备份）
+localBackupDir: 'D:\\备份'
+```
+
+### 自动清理
+
+本地备份自动保留 **7 天**，超过 7 天的备份文件会被自动清理。
+
+### 备份文件命名
+
+```
+backup-production-build-20260618-abc123.tar.gz
+backup-test-build-20260618-def456.tar.gz
 ```
 
 ## 部署流程详解

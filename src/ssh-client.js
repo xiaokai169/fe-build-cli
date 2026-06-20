@@ -138,6 +138,75 @@ export class SSHClient {
   }
 
   /**
+   * 从远程服务器下载文件（带进度条）
+   * @param {string} remotePath - 远程文件路径
+   * @param {string} localPath - 本地文件路径
+   * @returns {Promise<void>}
+   */
+  async downloadFile(remotePath, localPath) {
+    const startTime = Date.now();
+
+    // 格式化字节数为可读格式
+    function formatBytes(bytes) {
+      if (bytes < 1024) return bytes + ' B';
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+    }
+
+    // 渲染进度条
+    function renderBar(transferred, total) {
+      const percent = Math.round((transferred / total) * 100);
+      const barWidth = 30;
+      const filled = Math.round((percent / 100) * barWidth);
+      const bar = '█'.repeat(filled) + '░'.repeat(barWidth - filled);
+      const elapsed = (Date.now() - startTime) / 1000;
+      const speed = elapsed > 0 ? transferred / elapsed : 0;
+      process.stdout.write(
+        `\r下载进度: [${bar}] ${percent}%  ${formatBytes(transferred)}/${formatBytes(total)}  ${formatBytes(speed)}/s`
+      );
+    }
+
+    return new Promise((resolve, reject) => {
+      this.client.sftp((err, sftp) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        // 先获取文件大小
+        sftp.stat(remotePath, (err, stats) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+
+          const totalBytes = stats.size;
+
+          sftp.fastGet(
+            remotePath,
+            localPath,
+            {
+              step: (transferred, _chunk, total) => {
+                renderBar(transferred, total);
+              }
+            },
+            err => {
+              if (err) {
+                reject(err);
+              } else {
+                renderBar(totalBytes, totalBytes);
+                process.stdout.write('\n');
+                console.log(`✅ 下载成功: ${remotePath} -> ${localPath}`);
+                resolve();
+              }
+            }
+          );
+        });
+      });
+    });
+  }
+
+  /**
    * 断开 SSH 连接
    * @returns {Promise<void>}
    */

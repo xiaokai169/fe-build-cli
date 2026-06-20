@@ -11,6 +11,8 @@ export { SSHClient } from './ssh-client.js';
 export {
   getCurrentBranch,
   getGitSha,
+  getGitCommitMessage,
+  getGitCommitMessages,
   isWorkingTreeClean,
   checkUncommittedChanges,
   checkoutBranch,
@@ -35,8 +37,12 @@ export {
   uploadBuild,
   deployAndExtract,
   cleanupFiles,
+  downloadBackup,
   deployToServer,
-  rollbackDeployment
+  rollbackDeployment,
+  getServerBackupList,
+  getLocalBackupList,
+  rollbackFromLocal
 } from './deploy-core.js';
 
 // 钉钉通知
@@ -46,6 +52,21 @@ export {
   sendDeployFailureNotification,
   sendRollbackNotification
 } from './dingtalk.js';
+
+// 日志记录
+export {
+  DeployLogger,
+  cleanLocalBackups
+} from './logger.js';
+
+// 更新模块
+export {
+  getCurrentVersion,
+  getLatestVersion,
+  checkForUpdate,
+  performUpdate,
+  showUpdateInfo
+} from './update.js';
 
 // 配置模板
 export { default as configTemplate } from './config-template.js';
