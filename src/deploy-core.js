@@ -369,17 +369,23 @@ export async function pipeUploadDeploy(options) {
  * @param {object} options
  */
 async function swapDeployDir({ ssh, envConfig, tmpDeployDir, protectedDirs }) {
-  // 将受保护目录从旧部署目录移动到临时目录
   if (protectedDirs.length > 0) {
-    console.log(`🔒 迁移保护目录: ${protectedDirs.join(', ')}`);
-    const moveCmds = protectedDirs
-      .map(d => `[ -d ${envConfig.deployDir}/${d} ] && mv ${envConfig.deployDir}/${d} ${tmpDeployDir}/ || true`)
-      .join(' && ');
-    await ssh.execCommand(moveCmds);
+    // 有受保护目录：只清除非保护内容，再从临时目录移入新文件
+    // 不删除整个 deployDir，避免受保护目录内的权限问题导致 rm -rf 失败
+    console.log(`🔒 保护目录: ${protectedDirs.join(', ')}`);
+    const excludeArgs = protectedDirs.map(d => `! -name '${d}'`).join(' ');
+    // 只删除 deployDir 中非保护的文件和目录
+    const findCmd = protectedDirs.length > 0
+      ? `find ${envConfig.deployDir} -maxdepth 1 -mindepth 1 ${excludeArgs} -exec rm -rf {} + 2>/dev/null; `
+      : `rm -rf ${envConfig.deployDir}/* 2>/dev/null; `;
+    // 从临时目录移入新文件，然后清理临时目录
+    await ssh.execCommand(
+      `${findCmd}find ${tmpDeployDir} -maxdepth 1 -mindepth 1 -exec mv {} ${envConfig.deployDir}/ \\; 2>/dev/null; rm -rf ${tmpDeployDir}`
+    );
+  } else {
+    // 无受保护目录：直接原子替换（rm + mv，同一文件系统极快）
+    await ssh.execCommand(`rm -rf ${envConfig.deployDir} && mv ${tmpDeployDir} ${envConfig.deployDir}`);
   }
-
-  // 原子替换：删除旧目录 + 重命名新目录（同一文件系统，极快）
-  await ssh.execCommand(`rm -rf ${envConfig.deployDir} && mv ${tmpDeployDir} ${envConfig.deployDir}`);
 }
 
 /**
@@ -430,17 +436,8 @@ export async function deployAndExtract(options) {
     await ssh.execCommand(`tar -xzf ${remoteZipFile} -C ${tmpDeployDir}`);
     console.log('✅ 解压完成');
 
-    // 将受保护目录从旧部署目录迁移到临时目录
-    if (protectedDirs.length > 0) {
-      console.log(`🔒 迁移保护目录: ${protectedDirs.join(', ')}`);
-      const moveCmds = protectedDirs
-        .map(d => `[ -d ${envConfig.deployDir}/${d} ] && mv ${envConfig.deployDir}/${d} ${tmpDeployDir}/ || true`)
-        .join(' && ');
-      await ssh.execCommand(moveCmds);
-    }
-
-    // 原子替换（backupDir 和 deployDir 通常在同一文件系统，mv 是原子操作）
-    await ssh.execCommand(`rm -rf ${envConfig.deployDir} && mv ${tmpDeployDir} ${envConfig.deployDir}`);
+    // 原子替换（复用 swapDeployDir，有 protectedDirs 时不删受保护目录）
+    await swapDeployDir({ ssh, envConfig, tmpDeployDir, protectedDirs });
 
     logger.logDeploy(envConfig.deployDir, true);
     console.log('✅ 部署目录已切换（零空窗期）');
