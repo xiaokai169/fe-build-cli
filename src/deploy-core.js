@@ -6,6 +6,25 @@ import SSHClient from './ssh-client.js';
 import { DeployLogger, cleanLocalBackups } from './logger.js';
 
 /**
+ * 递归计算目录大小（跨平台，不依赖 du 命令）
+ * @param {string} dirPath - 目录路径
+ * @returns {number} 字节数
+ */
+function getDirSize(dirPath) {
+  let total = 0;
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      total += getDirSize(fullPath);
+    } else if (entry.isFile()) {
+      total += fs.statSync(fullPath).size;
+    }
+  }
+  return total;
+}
+
+/**
  * 获取服务器备份列表
  * @param {SSHClient} ssh - SSH 客户端
  * @param {object} envConfig - 环境配置
@@ -263,8 +282,7 @@ export async function pipeUploadDeploy(options) {
   // 计算 dist 目录大小（用于估算进度）
   let distSize = 0;
   try {
-    const sizeOutput = execSync('du -sb dist', { encoding: 'utf-8' });
-    distSize = parseInt(sizeOutput.split(/\s+/)[0], 10) || 0;
+    distSize = getDirSize('dist');
   } catch {
     // 无法获取大小，不显示进度百分比
   }
