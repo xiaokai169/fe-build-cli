@@ -248,7 +248,9 @@ export async function rsyncUploadDeploy(options) {
 
   // 构建 rsync SSH 连接参数
   const sshPort = envConfig.sshPort || 22;
-  const sshKeyPath = envConfig.sshKeyPath.replace(/^~/, process.env.HOME || process.env.USERPROFILE || '/root');
+  const sshKeyPath = envConfig.sshKeyPath
+    .replace(/^~/, process.env.HOME || process.env.USERPROFILE || '/root')
+    .replace(/\\/g, '/'); // Windows: 将反斜杠转为正斜杠，防止 shell 转义
   const sshOpts = `ssh -i "${sshKeyPath}" -p ${sshPort} -o StrictHostKeyChecking=no -o ConnectTimeout=15`;
   const remoteTarget = `${envConfig.sshUser}@${envConfig.sshHost}:${mirrorDir}`;
 
