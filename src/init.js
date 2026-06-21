@@ -10,7 +10,6 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { getCurrentBranch } from './git-branch.js';
-import { checkRsyncAvailable } from './deploy-core.js';
 
 /**
  * 交互式提示
@@ -441,12 +440,7 @@ export async function runInit(options = {}) {
   console.log(`\n✅ 配置文件已保存: ${configPath}`);
 
   // 生成后提示
-  const rsyncAvailable = checkRsyncAvailable();
-  if (rsyncAvailable) {
-    console.log('📌 检测到 rsync，部署时将优先使用增量同步模式');
-  } else {
-    console.log('📌 未检测到 rsync，将使用 tar 管道流直传');
-  }
+  console.log('📌 部署传输: tar 管道流直传（压缩→传输→解压流水线）');
 
   console.log('\n下一步:');
   console.log(`  1. 检查配置:    fe-build check production`);

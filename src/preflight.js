@@ -13,7 +13,6 @@ import os from 'node:os';
 import { execSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import SSHClient from './ssh-client.js';
-import { checkRsyncAvailable } from './deploy-core.js';
 import { checkUncommittedChanges, getCurrentBranch } from './git-branch.js';
 
 /**
@@ -64,8 +63,7 @@ export async function runPreflightChecks(options) {
       // 并行执行远程检查
       const remoteResults = await Promise.all([
         checkRemoteDiskSpace(ssh, envConfig),
-        checkRemoteDirPermissions(ssh, envConfig),
-        checkRemoteRsync(ssh)
+        checkRemoteDirPermissions(ssh, envConfig)
       ]);
       results.push(...remoteResults);
     }
@@ -80,9 +78,6 @@ export async function runPreflightChecks(options) {
       try { await ssh.disconnect(); } catch (e) { /* 忽略 */ }
     }
   }
-
-  // ====== 本地 rsync 检查 ======
-  results.push(checkLocalRsync());
 
   // 判断是否可以部署
   const failCount = results.filter(r => r.status === 'fail').length;
@@ -281,31 +276,6 @@ function checkDiskSpace(quick = false) {
   }
 
   return results;
-}
-
-/**
- * 检查本地 rsync 是否可用
- */
-function checkLocalRsync() {
-  if (checkRsyncAvailable()) {
-    return { name: '本地 rsync', status: 'pass', message: '可用（将优先使用增量同步）' };
-  }
-  return { name: '本地 rsync', status: 'warn', message: '不可用，将使用 tar 管道流传输' };
-}
-
-/**
- * 检查远程 rsync
- */
-async function checkRemoteRsync(ssh) {
-  try {
-    const result = await ssh.execCommand('which rsync 2>/dev/null || echo "NOT_FOUND"');
-    if (result.includes('NOT_FOUND')) {
-      return { name: '服务器 rsync', status: 'warn', message: '服务器未安装 rsync' };
-    }
-    return { name: '服务器 rsync', status: 'pass', message: `可用: ${result.trim()}` };
-  } catch {
-    return { name: '服务器 rsync', status: 'warn', message: '无法检测' };
-  }
 }
 
 /**
