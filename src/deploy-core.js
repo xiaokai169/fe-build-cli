@@ -302,6 +302,8 @@ export async function pipeUploadDeploy(options) {
         '-o', 'StrictHostKeyChecking=no',
         '-o', 'ConnectTimeout=15',
         '-o', 'LogLevel=QUIET',
+        '-o', 'BatchMode=yes',
+        '-o', 'PasswordAuthentication=no',
         sshTarget,
         `tar -xzf - -C ${envConfig.deployDir}`
       ];
