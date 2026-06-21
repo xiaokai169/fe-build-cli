@@ -4,18 +4,18 @@
 
 ## 功能特性
 
-- ✅ 多服务器环境部署
-- ✅ 三种发布模式：主分支发布 / 当前分支发布 / Test 环境发布
+- ✅ 一键发布：`fe-build deploy production --yes` 跳过所有交互
+- ✅ 项目初始化：`fe-build init` 交互式引导创建配置，自动检测框架/分支/包管理器
+- ✅ 环境预检：`fe-build check` 部署前检查本地+远程环境（SSH连通性/磁盘空间/目录权限）
+- ✅ 四级发布模式：simple / current / test / main
+- ✅ tar 管道流直传（压缩→传输→解压流水线，rsync → pipe → SFTP 三级降级）
 - ✅ Git 分支自动合并流程
 - ✅ 智能处理本地改动（自动提交或 stash 储藏）
-- ✅ SSH 远程部署（带进度条）
-- ✅ 自动备份与回滚
-- ✅ 线上备份下载到本地（保留 7 天）
-- ✅ 详细日志记录（每一步操作及状态）
-- ✅ 错误日志单独保存
+- ✅ 自动备份与回滚（服务器+本地双备份）
+- ✅ 配置校验（自动检测配置错误，友好错误提示）
 - ✅ 钉钉通知（成功/失败）
 - ✅ 保护目录（部署时不删除指定目录）
-- ✅ TypeScript 类型支持
+- ✅ 详细日志记录 + TypeScript 类型支持
 
 ## 流程图
 
@@ -39,66 +39,106 @@ npm install fe-build-cli --save-dev
 
 ## 快速开始
 
-### 1. 创建配置文件
+### 1. 初始化项目配置
 
-在项目根目录创建 `fe-build.config.js`：
+```bash
+fe-build init
+```
+
+交互式引导创建 `fe-build.config.js`，自动检测：
+- 项目框架（Vue/React/Angular）
+- Git 分支（test/main 或 develop/master）
+- 包管理器（yarn/npm/pnpm）
+- 构建命令
+
+### 2. 检查环境就绪
+
+```bash
+fe-build check production
+```
+
+部署前检查本地和远程环境，确保万无一失。
+
+### 3. 一键部署
+
+```bash
+# 一键发布到生产环境
+fe-build deploy production --yes
+
+# 交互式部署
+fe-build
+```
+
+### 配置文件示例
 
 ```javascript
 import process from 'node:process';
 
 export default {
-  // 分支配置（用于主分支发布模式）
+  // 分支配置
   branches: {
-    test: 'test',      // 测试分支名
-    main: 'main'       // 主分支名
+    test: 'test',
+    main: 'main'
   },
 
-  // 发布模式：'main'（主分支发布）或 'current'（当前分支发布）
-  deployMode: 'main',
+  // 发布模式: 'simple' (推荐) | 'current' | 'test' | 'main'
+  deployMode: 'simple',
 
   // 服务器配置
   servers: {
     production: {
       sshHost: 'your-server.com',
       sshUser: 'deployer',
+      sshPort: 22,
       sshKeyPath: `${process.env.USERPROFILE || process.env.HOME}/.ssh/id_rsa`,
       deployUrl: 'https://your-domain.com',
       backupDir: '/www/backups/your-app',
       deployDir: '/www/your-app',
       backupPrefix: 'backup-production',
       buildMode: 'production',
+      buildCommand: 'yarn build',
       protectedDirs: ['webgl', 'uploads']
-    },
-
-    test: {
-      sshHost: 'test-server.com',
-      sshUser: 'deployer',
-      sshKeyPath: `${process.env.USERPROFILE || process.env.HOME}/.ssh/id_rsa`,
-      deployUrl: 'https://test.your-domain.com',
-      backupDir: '/www/backups/test-app',
-      deployDir: '/www/test-app',
-      backupPrefix: 'backup-test',
-      buildMode: 'test',
-      protectedDirs: ['webgl']
     }
   }
 };
 ```
 
-### 2. 执行部署
-
-```bash
-# 交互式选择环境部署
-fe-build
-
-# 直接部署到指定环境
-fe-build deploy production
-
-# 部署到所有环境
-fe-build deploy all
-```
+> 也可以通过 `--config` 参数指定配置文件路径：`fe-build --config ./custom-config.js`
 
 ## 命令说明
+
+### init（初始化）
+
+```bash
+fe-build init
+```
+
+交互式引导创建 `fe-build.config.js`：
+- 自动检测项目框架（Vue/React/Angular）
+- 自动检测 Git 分支名
+- 自动检测包管理器（yarn/npm/pnpm）和构建命令
+- 可选配置测试服务器和钉钉通知
+- 生成后提示传输模式
+
+### check（环境检查）
+
+```bash
+fe-build check [环境]
+```
+
+部署前全量预检，不实际部署：
+
+| 检查项 | 说明 |
+|--------|------|
+| 配置校验 | 必填字段、路径格式、密钥存在性 |
+| Git 状态 | 工作区是否干净、当前分支 |
+| Node 版本 | >= 18.0.0 |
+| SSH 连通性 | 服务器可达性、认证有效性 |
+| 服务器磁盘 | 使用率、可用空间 |
+| 目录权限 | 部署目录和备份目录是否可写 |
+| rsync | 本地和服务器 rsync 可用性 |
+
+输出：✅ 通过 / ⚠️ 警告 / ❌ 阻断
 
 ### deploy（部署）
 
@@ -109,6 +149,8 @@ fe-build [deploy] [环境] [选项]
 | 参数 | 说明 |
 |------|------|
 | `环境` | 目标环境名称（如 production、test），或 `all` 部署到所有环境 |
+| `--yes`, `-y` | **一键模式** — 跳过所有交互确认，使用默认行为 |
+| `--skip-check` | 跳过部署前环境预检 |
 | `--config <路径>` | 指定配置文件路径 |
 | `--current-branch` | 使用当前分支发布（不切换分支） |
 | `--test-branch` | 使用 Test 环境发布流程（智能处理本地改动） |
@@ -118,165 +160,105 @@ fe-build [deploy] [环境] [选项]
 | `--skip-build` | 跳过构建步骤 |
 | `--no-push` | 发布时不推送到远程 |
 
+**传输方式（三级降级）：**
+
+```
+1. rsync 增量同步    ← 有 rsync 时优先（只传变更文件）
+   ↓ 失败降级
+2. tar 管道流直传    ← Windows→Linux 推荐（压缩→传输→解压流水线）
+   ↓ 失败降级
+3. SFTP 上传         ← 兜底（ssh2 库 fastPut）
+```
+
 **示例：**
 
 ```bash
+# 一键部署（推荐）
+fe-build deploy production --yes
+
 # 交互式部署
 fe-build
 
-# 部署到生产环境
+# 部署到指定环境
 fe-build deploy production
 
-# 当前分支发布（不切换分支）
+# 部署到所有环境
+fe-build deploy all --yes
+
+# 跳过预检紧急部署
+fe-build deploy production --yes --skip-check
+
+# 当前分支发布
 fe-build --current-branch
 
-# Test 环境发布（智能处理本地改动）
-fe-build --test-branch
-
-# Test 发布，合并本地改动
+# Test 环境发布
 fe-build --test-branch --merge
-
-# Test 发布，stash 储藏改动
-fe-build --test-branch --no-merge
 
 # 主分支发布流程
 fe-build --main-branch
 
-# 跳过构建，仅上传部署
-fe-build --skip-build
-
-# 使用指定配置文件
-fe-build --config ./custom-config.js
+# 指定配置文件
+fe-build --config ./custom-config.js production --yes
 ```
 
 ### rollback（回滚）
 
 ```bash
-fe-build rollback [环境] [--server|--local] [--version <版本号>]
+fe-build rollback [环境] [选项]
 ```
 
 | 参数 | 说明 |
 |------|------|
 | `环境` | 目标环境名称 |
+| `--yes`, `-y` | 一键模式 — 自动选择最新服务器备份 |
 | `--server` | 使用服务器备份（默认） |
 | `--local` | 使用本地备份 |
-| `--version <版本号>` | 指定回滚版本（可选） |
-
-**回滚流程：**
-
-1. 获取备份列表（服务器和本地）
-2. 选择备份来源（默认服务器）
-3. 从备份列表中选择要回滚的版本
-4. 执行回滚
+| `--version <版本号>` | 指定回滚版本 |
 
 **示例：**
 
 ```bash
-# 回滚生产环境（交互选择备份来源和版本）
+# 一键回滚（自动选最新备份）
+fe-build rollback production --yes
+
+# 交互式回滚
 fe-build rollback production
 
-# 回滚生产环境（使用服务器备份）
+# 指定备份来源
 fe-build rollback production --server
-
-# 回滚生产环境（使用本地备份）
 fe-build rollback production --local
 
-# 回滚到指定版本
+# 指定版本
 fe-build rollback production --version build-20240101-abc123
-```
-
-**备份列表显示：**
-
-```
-========================================
-  📦 选择备份来源
-========================================
-  1. 服务器备份 (5 个) - 默认
-  2. 本地备份 (3 个)
-========================================
-请选择备份来源 (1/2): 1
-
-========================================
-  📦 服务器备份列表
-========================================
-  1. 20260618-abc123 (12.5 MB) - 2026/6/18
-  2. 20260617-def456 (11.8 MB) - 2026/6/17
-  3. 20260616-ghi789 (10.2 MB) - 2026/6/16
-========================================
-请选择要回滚的备份 (1-3): 
 ```
 
 ### update（更新）
 
 ```bash
-fe-build update [--force|--auto]
+fe-build update [--force]
 fe-build check-update
-```
-
-| 参数 | 说明 |
-|------|------|
-| `--force` | 自动更新，无需确认 |
-| `--auto` | 自动更新，无需确认（同 --force） |
-
-**功能说明：**
-
-- `update` - 检查并更新到最新版本（交互确认）
-- `update --force` - 自动更新，无需确认
-- `check-update` - 仅检查是否有新版本
-
-**示例：**
-
-```bash
-# 检查并更新（需要确认）
-fe-build update
-
-# 自动更新（无需确认）
-fe-build update --force
-fe-build update --auto
-
-# 仅检查是否有更新
-fe-build check-update
-
-# 手动更新（推荐）
-npm update fe-build-cli --global
-```
-
-**更新输出示例：**
-
-```
-========================================
-  🔄 fe-build-cli 版本检查
-========================================
-当前版本: 1.5.0
-最新版本: 1.6.0
-
-📌 发现新版本!
-
-更新方法:
-  fe-build update          # 自动更新
-  npm update fe-build-cli --global  # 手动更新
-========================================
-```
-
-### version（版本）
-
-```bash
 fe-build version
-fe-build --version
-fe-build -v
-```
-
-显示当前安装的版本号。
-
-### help（帮助）
-
-```bash
 fe-build help
-fe-build --help
-fe-build -h
 ```
 
 ## 发布模式详解
+
+### Simple 简单发布模式（推荐）
+
+流程：当前分支 → 直接构建部署
+
+```
+┌─────────────┐     ┌─────────────┐
+│  当前分支   │ ──► │    部署     │
+└─────────────┘     └─────────────┘
+```
+
+**适用场景：** 个人项目、小团队、快速迭代。不做任何分支切换和合并。
+
+**执行步骤：**
+1. 检查工作区（有改动仅警告不阻断）
+2. 拉取最新代码
+3. 执行构建和部署
 
 ### 主分支发布模式
 
@@ -375,8 +357,8 @@ export default {
     main: 'main'       // 主分支名（必填，主分支模式需要）
   },
 
-  // 发布模式
-  deployMode: 'main',  // 'main' 或 'current'
+  // 发布模式: 'simple' (推荐) | 'current' | 'test' | 'main'
+  deployMode: 'simple',
 
   // 服务器配置
   servers: {
@@ -620,17 +602,24 @@ backup-test-build-20260618-def456.tar.gz
 
 ## 部署流程详解
 
-### 部署步骤（8 步）
+### 传输模式
+
+| 模式 | 原理 | 速度 | 触发条件 |
+|------|------|------|---------|
+| rsync 增量同步 | `rsync dist/ → 服务器镜像目录`，只传变更文件 | ⭐⭐⭐ | 本地有 rsync |
+| tar 管道流直传 | `tar czf - dist/ \| ssh tar xzf -`，流水线并行 | ⭐⭐⭐ | 默认 |
+| SFTP 上传 | ssh2 库 `fastPut` 全量上传 tar.gz | ⭐⭐ | 前两种失败时 |
+
+### 部署步骤
 
 ```
-[步骤 1/8] 构建项目
-[步骤 2/8] 验证构建输出
-[步骤 3/8] 压缩本地构建产物
-[步骤 4/8] 备份现有部署
-[步骤 5/8] 上传压缩包
-[步骤 6/8] 清理并解压新版本
-[步骤 7/8] 删除压缩包
-[步骤 8/8] 完成
+[步骤 1/7] 构建项目
+[步骤 2/7] 验证构建输出
+[步骤 3/7] 备份现有部署
+[步骤 4/7] 流式传输 dist/ → 服务器
+[步骤 5/7] 部署到目标目录
+[步骤 6/7] 清理临时文件
+[步骤 7/7] 完成
 ```
 
 ### 保护目录机制
@@ -655,10 +644,28 @@ protectedDirs: ['webgl', 'uploads', 'static']
 import {
   deployToServer,
   rollbackDeployment,
+  executeSimpleFlow,
   executeMainBranchFlow,
   executeCurrentBranchFlow,
+  executeTestBranchFlow,
+  runPreflightChecks,
+  runInit,
+  validateConfig,
   SSHClient
 } from 'fe-build-cli';
+
+// 初始化项目配置
+await runInit({ cwd: process.cwd() });
+
+// 环境预检
+const { canDeploy, results } = await runPreflightChecks({
+  environment: 'production',
+  envConfig: serverConfig,
+  config: fullConfig
+});
+
+// 校验配置
+const { valid, errors } = validateConfig(config);
 
 // 部署到服务器
 await deployToServer({
@@ -667,12 +674,8 @@ await deployToServer({
   buildVersion: 'build-20240101-abc123'
 });
 
-// 执行主分支发布流程
-const result = executeMainBranchFlow({
-  testBranch: 'test',
-  mainBranch: 'main',
-  pushToRemote: true
-});
+// 简单发布（推荐）
+const result = executeSimpleFlow(logger);
 
 // 使用 SSH 客户端
 const ssh = new SSHClient(serverConfig);
@@ -692,31 +695,42 @@ fe-build
 
 ## 常见问题
 
-### 1. SSH 连接失败
+### 1. 如何快速开始？
 
-检查 SSH 配置：
-- 确保 SSH 私钥路径正确
-- 确保服务器已添加到 known_hosts
-- 确保用户有部署目录的写入权限
+```bash
+fe-build init           # 初始化配置
+fe-build check production  # 检查环境
+fe-build deploy production --yes  # 一键发布
+```
 
-### 2. 构建失败
+### 2. 传输很慢怎么办？
 
-检查构建命令：
-- 确保 `buildCommand` 配置正确
-- 确保项目依赖已安装
-- 确保构建脚本可正常执行
+工具已内置三级降级，优先使用最快的：
+- **rsync**：仅传变更文件，安装 Git for Windows 自带
+- **管道流**：默认方案，压缩→传输→解压流水线
+- **SFTP**：兜底方案
 
-### 3. 分支合并冲突
+### 3. SSH 连接失败
 
-主分支发布模式下，如果合并有冲突：
-- 工具会自动中止合并
-- 需要手动解决冲突后重新执行
+先用预检排查：`fe-build check production`
 
-### 4. Windows 路径问题
+常见原因：
+- SSH 私钥路径是否正确
+- 服务器端口是否开放
+- 用户是否有部署目录写入权限
 
-Windows 下 SSH 私钥路径：
-```javascript
-sshKeyPath: `${process.env.USERPROFILE}/.ssh/id_rsa`
+### 4. 分支合并冲突
+
+主分支发布模式下冲突时：
+- 工具自动中止合并
+- 手动解决冲突后重新执行
+
+### 5. 如何跳过交互？
+
+所有命令都支持 `--yes` / `-y`：
+```bash
+fe-build deploy production --yes
+fe-build rollback production --yes
 ```
 
 ## 版本要求
