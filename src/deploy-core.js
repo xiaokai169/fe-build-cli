@@ -316,7 +316,7 @@ export async function pipeUploadDeploy(options) {
           const barW = 20;
           const tick = Math.floor((elapsed * 4) % barW);
           const bar = '░'.repeat(tick) + '█' + '░'.repeat(Math.max(0, barW - tick - 1));
-          const sizeRef = distRawSize > 0 ? ` / ~${formatBytes(distRawSize)}` : '';
+          const sizeRef = distRawSize > 0 ? ` / ${formatBytes(distRawSize)}` : '';
           process.stdout.write(`\r  [${bar}] ${formatBytes(bytesTransferred)}${sizeRef}  ${formatBytes(speed)}/s  ${Math.round(elapsed)}s`);
         }
       });
