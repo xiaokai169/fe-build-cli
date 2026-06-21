@@ -255,20 +255,6 @@ export async function pipeUploadDeploy(options) {
     .replace(/\\/g, '/');
   const sshTarget = `${envConfig.sshUser}@${envConfig.sshHost}`;
 
-  // 计算 dist 原始大小（仅用于进度参考，不加百分比）
-  let distRawSize = 0;
-  try {
-    const walk = (dir) => {
-      let size = 0;
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const fp = path.join(dir, entry.name);
-        size += entry.isDirectory() ? walk(fp) : fs.statSync(fp).size;
-      }
-      return size;
-    };
-    distRawSize = walk('dist');
-  } catch { /* 忽略 */ }
-
   const startTime = Date.now();
 
   // 格式化
@@ -277,10 +263,6 @@ export async function pipeUploadDeploy(options) {
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
   };
-
-  if (distRawSize > 0) {
-    console.log(`  dist: ${formatBytes(distRawSize)}`);
-  }
 
   try {
     await new Promise((resolve, reject) => {
@@ -300,9 +282,15 @@ export async function pipeUploadDeploy(options) {
       const sshProc = spawn('ssh', sshArgs);
 
       let bytesTransferred = 0;
+      let totalCompressed = 0;   // 压缩后总大小（tar 结束时确定）
       let lastUpdate = Date.now();
 
       tar.stdout.pipe(sshProc.stdin);
+
+      // tar 压缩结束 → 捕获压缩后总大小
+      tar.stdout.on('end', () => {
+        totalCompressed = bytesTransferred;
+      });
 
       tar.stdout.on('data', (chunk) => {
         bytesTransferred += chunk.length;
@@ -312,12 +300,12 @@ export async function pipeUploadDeploy(options) {
           lastUpdate = now;
           const elapsed = (now - startTime) / 1000;
           const speed = elapsed > 0 ? bytesTransferred / elapsed : 0;
-          // 进度条：已传 / 总数 / 速度
+          // 进度条：已传 / 总数（都是压缩后数据）/ 速度
           const barW = 20;
           const tick = Math.floor((elapsed * 4) % barW);
           const bar = '░'.repeat(tick) + '█' + '░'.repeat(Math.max(0, barW - tick - 1));
-          const sizeRef = distRawSize > 0 ? ` / ${formatBytes(distRawSize)}` : '';
-          process.stdout.write(`\r  [${bar}] ${formatBytes(bytesTransferred)}${sizeRef}  ${formatBytes(speed)}/s  ${Math.round(elapsed)}s`);
+          const totalStr = totalCompressed > 0 ? ` / ${formatBytes(totalCompressed)}` : '';
+          process.stdout.write(`\r  [${bar}] ${formatBytes(bytesTransferred)}${totalStr}  ${formatBytes(speed)}/s  ${Math.round(elapsed)}s`);
         }
       });
 
