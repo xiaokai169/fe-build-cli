@@ -262,12 +262,15 @@ export async function pipeUploadDeploy(options) {
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
   };
 
-  // 预取压缩后大小（本地压缩 + wc -c，只跑 CPU 不走网络）
+  // 预取压缩后大小（本地 tar 压缩到内存取字节数，纯 CPU 不走网络）
   let totalCompressed = 0;
   try {
     process.stdout.write('  预计算压缩大小...');
-    const result = execSync('tar -czf - -C dist . | wc -c', { encoding: 'utf-8' });
-    totalCompressed = parseInt(result.trim(), 10);
+    const result = execSync('tar -czf - -C dist .', {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 1024 * 1024 * 1024  // 1GB，避免大项目溢出
+    });
+    totalCompressed = result.length;
     process.stdout.write(`\r  ${formatBytes(totalCompressed)}（压缩后），开始传输...\n`);
   } catch {
     console.log('  无法预计算，传输中将自动捕获');
