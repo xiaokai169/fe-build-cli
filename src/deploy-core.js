@@ -237,7 +237,7 @@ export async function pipeUploadDeploy(options) {
   console.log(`\n[步骤 ${stepNum}/8] 准备临时部署目录...`);
 
   const protectedDirs = envConfig.protectedDirs || [];
-  const tmpDeployDir = `${envConfig.deployDir}.new`;
+  const tmpDeployDir = `${envConfig.backupDir}/deploy-tmp`;
 
   // 确保临时目录存在且为空
   await ssh.execCommand(`rm -rf ${tmpDeployDir} && mkdir -p ${tmpDeployDir}`);
