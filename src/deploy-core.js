@@ -6,6 +6,23 @@ import SSHClient from './ssh-client.js';
 import { DeployLogger, cleanLocalBackups } from './logger.js';
 
 /**
+ * 递归计算目录大小（跨平台）
+ */
+function getDirSize(dirPath) {
+  let total = 0;
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      total += getDirSize(fullPath);
+    } else if (entry.isFile()) {
+      total += fs.statSync(fullPath).size;
+    }
+  }
+  return total;
+}
+
+/**
  * 获取服务器备份列表
  * @param {SSHClient} ssh - SSH 客户端
  * @param {object} envConfig - 环境配置
@@ -260,6 +277,12 @@ export async function pipeUploadDeploy(options) {
     .replace(/\\/g, '/');
   const sshTarget = `${envConfig.sshUser}@${envConfig.sshHost}`;
 
+  // 估算压缩后大小（前端 dist 压缩率约 30%，用于进度条百分比）
+  let estimatedSize = 0;
+  try {
+    estimatedSize = getDirSize('dist') * 0.3;
+  } catch { /* 忽略 */ }
+
   const startTime = Date.now();
 
   // 格式化
@@ -297,7 +320,15 @@ export async function pipeUploadDeploy(options) {
           lastUpdate = now;
           const elapsed = (now - startTime) / 1000;
           const speed = elapsed > 0 ? bytesTransferred / elapsed : 0;
-          process.stdout.write(`\r  已传输: ${formatBytes(bytesTransferred)}  ${formatBytes(speed)}/s  (${Math.round(elapsed)}s)`);
+          if (estimatedSize > 0) {
+            const pct = Math.min(99, Math.round((bytesTransferred / estimatedSize) * 100));
+            const barW = 25;
+            const filled = Math.round((pct / 100) * barW);
+            const bar = '█'.repeat(filled) + '░'.repeat(barW - filled);
+            process.stdout.write(`\r  [${bar}] ${pct}%  ${formatBytes(bytesTransferred)}  ${formatBytes(speed)}/s  ${Math.round(elapsed)}s`);
+          } else {
+            process.stdout.write(`\r  已传输: ${formatBytes(bytesTransferred)}  ${formatBytes(speed)}/s  ${Math.round(elapsed)}s`);
+          }
         }
       });
 
@@ -312,7 +343,8 @@ export async function pipeUploadDeploy(options) {
       sshProc.on('close', (code) => {
         if (code === 0) {
           const elapsed = (Date.now() - startTime) / 1000;
-          process.stdout.write(`\r  已传输: ${formatBytes(bytesTransferred)}  完成 (${Math.round(elapsed)}s)                    \n`);
+          const bar = '█'.repeat(25);
+          process.stdout.write(`\r  [${bar}] 100%  ${formatBytes(bytesTransferred)}  完成 ${Math.round(elapsed)}s                    \n`);
           resolve(bytesTransferred);
         } else {
           reject(new Error(`SSH 退出码: ${code}`));
