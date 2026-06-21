@@ -336,8 +336,10 @@ export async function pipeUploadDeploy(options) {
         // tar 的 stderr 有时是正常的（比如权限警告），不输出到控制台
       });
 
+      // SSH stderr 静默（服务器登录脚本的 locale 警告等）
+      let sshStderr = '';
       sshProc.stderr.on('data', (data) => {
-        process.stderr.write(data);
+        sshStderr += data.toString();
       });
 
       sshProc.on('close', (code) => {
@@ -347,7 +349,7 @@ export async function pipeUploadDeploy(options) {
           process.stdout.write(`\r  [${bar}] 100%  ${formatBytes(bytesTransferred)}  完成 ${Math.round(elapsed)}s                    \n`);
           resolve(bytesTransferred);
         } else {
-          reject(new Error(`SSH 退出码: ${code}`));
+          reject(new Error(`SSH 退出码: ${code}${sshStderr ? ', stderr: ' + sshStderr.trim() : ''}`));
         }
       });
 
