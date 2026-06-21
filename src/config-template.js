@@ -1,9 +1,129 @@
 import process from 'node:process';
+import fs from 'node:fs';
 
 /**
  * fe-build-cli 配置文件模板
  * 将此文件复制到项目根目录并重命名为 fe-build.config.js
  */
+
+/**
+ * 校验配置文件
+ * @param {object} config - 配置对象
+ * @returns {{ valid: boolean, errors: Array<{field: string, message: string}> }}
+ */
+export function validateConfig(config) {
+  const errors = [];
+
+  // 校验服务器配置
+  if (config.servers) {
+    for (const [envName, envConfig] of Object.entries(config.servers)) {
+      if (!envConfig || typeof envConfig !== 'object') continue;
+
+      // 必填字段
+      const requiredFields = [
+        ['sshHost', 'SSH 主机地址'],
+        ['sshUser', 'SSH 用户名'],
+        ['sshKeyPath', 'SSH 密钥路径'],
+        ['deployDir', '部署目录'],
+        ['backupDir', '备份目录']
+      ];
+
+      for (const [key, label] of requiredFields) {
+        if (!envConfig[key]) {
+          errors.push({
+            field: `servers.${envName}.${key}`,
+            message: `缺少必填配置: ${label}`
+          });
+        }
+      }
+
+      // SSH 密钥存在性
+      if (envConfig.sshKeyPath) {
+        const keyPath = envConfig.sshKeyPath
+          .replace(/^~/, process.env.HOME || process.env.USERPROFILE || '/root');
+        if (!fs.existsSync(keyPath)) {
+          errors.push({
+            field: `servers.${envName}.sshKeyPath`,
+            message: `SSH 密钥文件不存在: ${keyPath}`
+          });
+        }
+      }
+
+      // 路径格式校验（服务器路径必须以 / 开头）
+      if (envConfig.deployDir && !envConfig.deployDir.startsWith('/')) {
+        errors.push({
+          field: `servers.${envName}.deployDir`,
+          message: `部署目录必须是绝对路径（以 / 开头）: ${envConfig.deployDir}`
+        });
+      }
+      if (envConfig.backupDir && !envConfig.backupDir.startsWith('/')) {
+        errors.push({
+          field: `servers.${envName}.backupDir`,
+          message: `备份目录必须是绝对路径（以 / 开头）: ${envConfig.backupDir}`
+        });
+      }
+
+      // URL 格式校验
+      if (envConfig.deployUrl && !envConfig.deployUrl.startsWith('http')) {
+        errors.push({
+          field: `servers.${envName}.deployUrl`,
+          message: `部署 URL 格式不正确（需以 http 开头）: ${envConfig.deployUrl}`
+        });
+      }
+    }
+  }
+
+  // 校验钉钉配置
+  if (config.dingtalk && config.dingtalk.enabled) {
+    if (!config.dingtalk.webhook) {
+      errors.push({
+        field: 'dingtalk.webhook',
+        message: '钉钉通知已启用但未配置 webhook URL'
+      });
+    } else if (!config.dingtalk.webhook.startsWith('https://oapi.dingtalk.com/robot/send')) {
+      errors.push({
+        field: 'dingtalk.webhook',
+        message: '钉钉 webhook URL 格式不正确'
+      });
+    }
+  }
+
+  // 校验分支配置
+  if (config.branches) {
+    if (!config.branches.test) {
+      errors.push({
+        field: 'branches.test',
+        message: '测试分支名未配置'
+      });
+    }
+    if (!config.branches.main) {
+      errors.push({
+        field: 'branches.main',
+        message: '主分支名未配置'
+      });
+    }
+  }
+
+  // 校验构建命令
+  if (!config.servers) {
+    errors.push({
+      field: 'servers',
+      message: '未配置任何服务器'
+    });
+  }
+
+  if (config.deployMode && !['main', 'current', 'simple', 'test'].includes(config.deployMode)) {
+    errors.push({
+      field: 'deployMode',
+      message: `无效的发布模式: ${config.deployMode}，支持: main, current, simple, test`
+    });
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors
+  };
+}
 
 export default {
   /**

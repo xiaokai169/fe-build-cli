@@ -25,6 +25,7 @@ export {
   executeMainBranchFlow,
   executeCurrentBranchFlow,
   executeTestBranchFlow,
+  executeSimpleFlow,
   restoreBranch
 } from './git-branch.js';
 
@@ -32,6 +33,7 @@ export {
 export {
   checkRsyncAvailable,
   rsyncUploadDeploy,
+  pipeUploadDeploy,
   buildProject,
   verifyBuildOutput,
   compressBuild,
@@ -71,4 +73,10 @@ export {
 } from './update.js';
 
 // 配置模板
-export { default as configTemplate } from './config-template.js';
+export { default as configTemplate, validateConfig } from './config-template.js';
+
+// 预检模块
+export { runPreflightChecks } from './preflight.js';
+
+// 初始化模块
+export { runInit } from './init.js';

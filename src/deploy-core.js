@@ -228,12 +228,12 @@ export async function backupExistingDeployment(options) {
 }
 
 /**
- * 使用 RSYNC 增量部署（替代 compressBuild + uploadBuild + deployAndExtract）
+ * 使用 RSYNC 增量部署
  *
  * 流程:
  *   1. rsync --delete dist/ → 服务器持久化镜像目录 (增量同步, 只传变更文件)
- *   2. 服务器本地 cp 镜像 → 交换目录 (毫秒级)
- *   3. 备份当前 deployDir (复用现有逻辑)
+ *   2. 服务器本地 cp 镜像 → 交换目录
+ *   3. 备份当前 deployDir
  *   4. rm deployDir/* + mv 交换目录/* → deployDir (原子切换)
  *
  * @param {object} options - 选项
@@ -241,91 +241,74 @@ export async function backupExistingDeployment(options) {
 export async function rsyncUploadDeploy(options) {
   const { ssh, envConfig, buildVersion, skipBuild, logger } = options;
 
-  // 持久化镜像目录 (保留在服务器上供下次增量比对)
   const mirrorDir = `${envConfig.backupDir}/.rsync-mirror`;
-  // 交换目录 (与 deployDir 同层级, 确保 mv 原子操作)
   const swapDir = `${envConfig.deployDir}.swap`;
 
-  // 构建 rsync SSH 连接参数
   const sshPort = envConfig.sshPort || 22;
   const sshKeyPath = envConfig.sshKeyPath
     .replace(/^~/, process.env.HOME || process.env.USERPROFILE || '/root')
-    .replace(/\\/g, '/'); // Windows: 将反斜杠转为正斜杠，防止 shell 转义
+    .replace(/\\/g, '/');
   const rshCmd = `ssh -i "${sshKeyPath}" -p ${sshPort} -o StrictHostKeyChecking=no -o ConnectTimeout=15`;
   const remoteTarget = `${envConfig.sshUser}@${envConfig.sshHost}:${mirrorDir}`;
 
-  // ====== A. rsync 增量同步 ======
   console.log(`\n[RSYNC] 增量同步 dist/ → ${envConfig.sshHost}:${mirrorDir}`);
-  console.log('  (首次全量, 后续仅传输变更文件)');
 
-  const rsyncStartTime = Date.now();
+  const startTime = Date.now();
 
   try {
-    // 确保镜像目录存在
     await ssh.execCommand(`mkdir -p ${mirrorDir}`);
 
-    // 使用 RSYNC_RSH 环境变量避免 -e 参数中的引号嵌套问题 (Windows 兼容)
     execSync(
       `rsync -avz --delete --no-perms --no-owner --no-group ./dist/ ${remoteTarget}/`,
       { stdio: 'inherit', env: { ...process.env, RSYNC_RSH: rshCmd } }
     );
 
-    const rsyncDuration = Math.round((Date.now() - rsyncStartTime) / 1000);
-    console.log(`✅ 增量同步完成 (${rsyncDuration}s)`);
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    console.log(`✅ rsync 增量同步完成 (${duration}s)`);
 
-    // 记录上传日志
     try {
       const mirrorSize = await ssh.execCommand(`du -sb ${mirrorDir} 2>/dev/null | cut -f1`);
-      logger.logUpload('dist/', mirrorDir, parseInt(mirrorSize.trim()) || 0, rsyncDuration, true);
+      logger.logUpload('dist/', mirrorDir, parseInt(mirrorSize.trim()) || 0, duration, true);
     } catch {
-      logger.logUpload('dist/', mirrorDir, 0, rsyncDuration, true);
+      logger.logUpload('dist/', mirrorDir, 0, duration, true);
     }
   } catch (error) {
     logger.logUpload('dist/', mirrorDir, 0, 0, false);
     throw new Error(`rsync 同步失败: ${error.message}`);
   }
 
-  // ====== B. 服务器本地拷贝镜像 → 交换目录 ======
-  console.log('\n[RSYNC] 准备部署文件...');
+  // 服务器本地 cp 镜像 → 交换目录
   try {
     await ssh.execCommand(`rm -rf ${swapDir} && cp -a ${mirrorDir} ${swapDir}`);
-    console.log('✅ 部署文件就绪');
   } catch (error) {
     throw new Error(`准备部署文件失败: ${error.message}`);
   }
 
-  // ====== C. 备份当前部署 ======
+  // 备份当前部署
   await backupExistingDeployment({ ssh, envConfig, buildVersion, skipBuild, logger });
 
-  // ====== D. 原子切换 ======
+  // 原子切换
   const stepNum = skipBuild ? '4' : '6';
   console.log(`\n[步骤 ${stepNum}/8] 部署到目标目录...`);
 
   const protectedDirs = envConfig.protectedDirs || [];
-
-  // 确保目标目录存在
   await ssh.execCommand(`mkdir -p ${envConfig.deployDir}`);
 
-  // 清空部署目录 (保留受保护目录)
   if (protectedDirs.length > 0) {
-    console.log(`🔒 保护目录: ${protectedDirs.join(', ')}`);
     const excludeArgs = protectedDirs.map(d => `! -name '${d}'`).join(' ');
     await ssh.execCommand(
       `find ${envConfig.deployDir} -maxdepth 1 -mindepth 1 ${excludeArgs} -exec rm -rf {} +`
     );
-    console.log('✅ 已清理非保护目录');
   } else {
     await ssh.execCommand(`rm -rf ${envConfig.deployDir}/*`);
   }
 
-  // 原子移动: mv 在同文件系统内是 rename 操作, 瞬间完成
   try {
     await ssh.execCommand(`sh -c 'mv ${swapDir}/* ${envConfig.deployDir}/ && rm -rf ${swapDir}'`);
     logger.logDeploy(envConfig.deployDir, true);
     console.log('✅ 部署切换完成');
   } catch (error) {
     logger.logDeploy(envConfig.deployDir, false);
-    // 还原备份
     const latestBackup = `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}.tar.gz`;
     console.error('❌ 切换失败, 尝试还原备份...');
     try {
@@ -337,8 +320,82 @@ export async function rsyncUploadDeploy(options) {
     throw error;
   }
 
-  // ====== E. 清理交换目录 ======
   await ssh.execCommand(`rm -rf ${swapDir}`);
+}
+
+/**
+ * 使用 tar 管道流直传部署（Windows → Linux 推荐方案）
+ *
+ * 原理:
+ *   local: tar -czf - dist/   （打包到 stdout，不写临时文件）
+ *     | pipe
+ *   remote: ssh exec tar -xzf - -C /deploy/dir  （从 stdin 解压）
+ *
+ * 压缩、传输、解压三者流水线并行，不经过 SFTP 协议，不落临时文件。
+ *
+ * @param {object} options - 选项
+ */
+export async function pipeUploadDeploy(options) {
+  const { ssh, envConfig, buildVersion, skipBuild, logger } = options;
+
+  // ====== A. 备份当前部署 ======
+  await backupExistingDeployment({ ssh, envConfig, buildVersion, skipBuild, logger });
+
+  // ====== B. 清空部署目录（保留受保护目录）======
+  const stepNum = skipBuild ? '3' : '5';
+  console.log(`\n[步骤 ${stepNum}/8] 准备部署目录...`);
+
+  const protectedDirs = envConfig.protectedDirs || [];
+  await ssh.execCommand(`mkdir -p ${envConfig.deployDir}`);
+
+  if (protectedDirs.length > 0) {
+    console.log(`🔒 保护目录: ${protectedDirs.join(', ')}`);
+    const excludeArgs = protectedDirs.map(d => `! -name '${d}'`).join(' ');
+    await ssh.execCommand(
+      `find ${envConfig.deployDir} -maxdepth 1 -mindepth 1 ${excludeArgs} -exec rm -rf {} +`
+    );
+  } else {
+    await ssh.execCommand(`rm -rf ${envConfig.deployDir}/*`);
+  }
+  console.log('✅ 部署目录已就绪');
+
+  // ====== C. tar 管道流直传 ======
+  console.log(`\n[步骤 ${stepNum}/8] 流式传输 dist/ → ${envConfig.sshHost}...`);
+  console.log('  (tar 管道: 压缩→传输→解压 流水线并行)');
+
+  const sshPort = envConfig.sshPort || 22;
+  const sshKeyPath = envConfig.sshKeyPath
+    .replace(/^~/, process.env.HOME || process.env.USERPROFILE || '/root')
+    .replace(/\\/g, '/'); // Windows 反斜杠转正斜杠
+
+  const sshTarget = `${envConfig.sshUser}@${envConfig.sshHost}`;
+  const startTime = Date.now();
+
+  try {
+    execSync(
+      `tar -czf - -C dist . | ssh -i "${sshKeyPath}" -p ${sshPort} -o StrictHostKeyChecking=no -o ConnectTimeout=15 ${sshTarget} "tar -xzf - -C ${envConfig.deployDir}"`,
+      { stdio: 'inherit' }
+    );
+
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    console.log(`✅ 流式传输完成 (${duration}s)`);
+    logger.logDeploy(envConfig.deployDir, true);
+    logger.logUpload('dist/', envConfig.deployDir, 0, duration, true);
+  } catch (error) {
+    logger.logDeploy(envConfig.deployDir, false);
+    logger.logUpload('dist/', envConfig.deployDir, 0, 0, false);
+
+    // 尝试还原备份
+    const latestBackup = `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}.tar.gz`;
+    console.error('\n❌ 流式传输失败，尝试还原备份...');
+    try {
+      await ssh.execCommand(`tar -xzf ${latestBackup} -C ${envConfig.deployDir}`);
+      console.log('✅ 已还原备份');
+    } catch (restoreError) {
+      console.error('⚠️  还原备份也失败了，请手动检查');
+    }
+    throw new Error(`管道传输失败: ${error.message}`);
+  }
 }
 
 /**
@@ -488,24 +545,45 @@ export async function deployToServer(options) {
 
   const ssh = new SSHClient(envConfig);
 
-  // 检测 rsync 可用性（优先使用 rsync 增量同步）
-  const useRsync = checkRsyncAvailable();
+  // 传输策略：rsync > 管道流 > SFTP 三级降级
+  let useRsync = checkRsyncAvailable();
+  let usePipe = !useRsync;
+  let useSftp = false;
 
   if (useRsync) {
     console.log('\n📌 检测到 rsync，使用增量同步模式');
   } else {
-    console.log('\n📌 未检测到 rsync，使用 SFTP 上传模式');
+    console.log('\n📌 使用 tar 管道流直传模式');
   }
 
   try {
     await ssh.connect();
     logger.logSSHConnect(envConfig.sshHost, true);
 
+    // ====== 方案A: RSYNC 增量同步 ======
     if (useRsync) {
-      // ====== RSYNC 路径 ======
-      await rsyncUploadDeploy({ ssh, envConfig, buildVersion, skipBuild, logger });
-    } else {
-      // ====== SFTP 路径（降级）======
+      try {
+        await rsyncUploadDeploy({ ssh, envConfig, buildVersion, skipBuild, logger });
+      } catch (rsyncError) {
+        console.log('\n⚠️  rsync 失败，降级为 tar 管道流...');
+        useRsync = false;
+        usePipe = true;
+      }
+    }
+
+    // ====== 方案B: tar 管道流直传 ======
+    if (usePipe) {
+      try {
+        await pipeUploadDeploy({ ssh, envConfig, buildVersion, skipBuild, logger });
+      } catch (pipeError) {
+        console.log('\n⚠️  管道流失败，降级为 SFTP 上传...');
+        usePipe = false;
+        useSftp = true;
+      }
+    }
+
+    if (useSftp) {
+      // ====== 方案C: SFTP 上传（兜底）======
       const localZipFile = `dist-${buildVersion}.tar.gz`;
       const remoteZipFile = `${envConfig.backupDir}/${localZipFile}`;
 
@@ -547,6 +625,8 @@ export async function deployToServer(options) {
     console.log(`地址: ${envConfig.deployUrl}`);
     if (useRsync) {
       console.log(`传输模式: rsync 增量同步`);
+    } else if (usePipe) {
+      console.log(`传输模式: tar 管道流直传`);
     }
     console.log('========================================');
 
@@ -706,6 +786,7 @@ export async function rollbackDeployment(options) {
 export default {
   checkRsyncAvailable,
   rsyncUploadDeploy,
+  pipeUploadDeploy,
   buildProject,
   verifyBuildOutput,
   compressBuild,

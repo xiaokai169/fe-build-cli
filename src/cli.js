@@ -14,6 +14,7 @@ import {
   executeMainBranchFlow,
   executeCurrentBranchFlow,
   executeTestBranchFlow,
+  executeSimpleFlow,
   restoreBranch,
   stashPop
 } from './git-branch.js';
@@ -24,6 +25,9 @@ import {
 } from './dingtalk.js';
 import { DeployLogger } from './logger.js';
 import { checkForUpdate, performUpdate, showUpdateInfo, getCurrentVersion } from './update.js';
+import { runPreflightChecks } from './preflight.js';
+import { runInit } from './init.js';
+import { validateConfig } from './config-template.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -167,15 +171,18 @@ fe-build-cli - 前端项目打包部署工具
   fe-build [命令] [选项]
 
 命令:
-  deploy [环境]     部署到指定环境（默认命令）
-  rollback [环境]   回滚到指定版本（交互选择备份来源）
-  update            检查并更新到最新版本
-  update --force    自动更新（无需确认）
-  check-update      仅检查是否有新版本
-  version           显示当前版本号
-  help              显示帮助信息
+  init               初始化项目配置（交互式引导创建 fe-build.config.js）
+  check [环境]       环境预检（检查本地和远程环境是否就绪，不执行部署）
+  deploy [环境]      部署到指定环境（默认命令）
+  rollback [环境]    回滚到指定版本（交互选择备份来源）
+  update             检查并更新到最新版本
+  update --force     自动更新（无需确认）
+  check-update       仅检查是否有新版本
+  version            显示当前版本号
+  help               显示帮助信息
 
 选项:
+  --yes, -y          一键模式（跳过所有交互确认，使用默认行为）
   --config <路径>    指定配置文件路径
   --current-branch   使用当前分支发布（不切换分支）
   --main-branch      使用主分支发布流程（合并到测试分支再合并到主分支）
@@ -183,44 +190,49 @@ fe-build-cli - 前端项目打包部署工具
   --merge            test 发布时合并本地改动（提交+推送+合并）
   --no-merge         test 发布时不合并，使用 stash 储藏本地改动
   --skip-build       跳过构建步骤
+  --skip-check       跳过部署前环境预检
   --no-push          发布时不推送到远程
   --server           回滚时使用服务器备份（默认）
   --local            回滚时使用本地备份
   --version <版本号>  回滚到指定版本
 
 示例:
-  fe-build                    # 交互式选择环境部署
-  fe-build deploy production  # 部署到生产环境
-  fe-build deploy test        # 部署到测试环境（使用配置的 deployMode）
-  fe-build --test-branch      # test 环境发布（智能处理本地改动）
-  fe-build --test-branch --merge    # test 发布，合并本地改动
-  fe-build --test-branch --no-merge # test 发布，stash 储藏改动
-  fe-build --current-branch   # 当前分支发布
-  fe-build --main-branch      # 主分支发布流程
-  fe-build rollback production           # 回滚生产环境（交互选择）
-  fe-build rollback production --server  # 回滚生产环境（服务器备份）
-  fe-build rollback production --local   # 回滚生产环境（本地备份）
+  fe-build init                           # 初始化项目配置
+  fe-build check production               # 检查生产环境是否就绪
+  fe-build                                # 交互式选择环境部署
+  fe-build deploy production --yes        # 一键部署到生产环境
+  fe-build deploy test                    # 部署到测试环境
+  fe-build --test-branch                  # test 环境发布（智能处理本地改动）
+  fe-build --test-branch --merge          # test 发布，合并本地改动
+  fe-build --test-branch --no-merge       # test 发布，stash 储藏改动
+  fe-build --current-branch               # 当前分支发布
+  fe-build --main-branch                  # 主分支发布流程
+  fe-build rollback production            # 回滚生产环境（交互选择）
+  fe-build rollback production --server   # 回滚生产环境（服务器备份）
+  fe-build rollback production --local    # 回滚生产环境（本地备份）
 
 配置文件 (fe-build.config.js):
   export default {
     // 分支配置
     branches: {
-      test: 'test',      // 测试分支名
-      main: 'main'       // 主分支名
+      test: 'test',
+      main: 'main'
     },
-    // 发布模式: 'main' 或 'current'
-    deployMode: 'main',
+    // 发布模式: 'simple' (推荐) | 'current' | 'main' | 'test'
+    deployMode: 'simple',
     // 服务器配置
     servers: {
       production: {
         sshHost: 'server.com',
         sshUser: 'deployer',
+        sshPort: 22,
         sshKeyPath: '~/.ssh/id_rsa',
         deployUrl: 'https://domain.com',
         backupDir: '/www/backups/app',
         deployDir: '/www/app',
         backupPrefix: 'backup',
         buildMode: 'production',
+        buildCommand: 'yarn build',
         protectedDirs: ['webgl']
       }
     }
@@ -247,7 +259,9 @@ async function deployCommand(config) {
   const useMerge = args.includes('--merge');
   const useNoMerge = args.includes('--no-merge');
   const skipBuild = args.includes('--skip-build');
+  const skipCheck = args.includes('--skip-check');
   const noPush = args.includes('--no-push');
+  const yesMode = args.includes('--yes') || args.includes('-y');
 
   // 获取目标环境（排除 deploy 命令本身）
   const argEnv = args.find(arg => arg !== 'deploy' && !arg.startsWith('--'));
@@ -256,6 +270,15 @@ async function deployCommand(config) {
   const validArgs = [...serverNames, 'all'];
   if (argEnv && validArgs.includes(argEnv)) {
     selectedServers = argEnv === 'all' ? serverNames : [argEnv];
+  } else if (yesMode && serverNames.length === 1) {
+    // 一键模式 + 只有一个服务器：自动选择
+    selectedServers = serverNames;
+    console.log(`📌 一键模式：自动选择 ${serverNames[0]}`);
+  } else if (yesMode) {
+    // 一键模式 + 多个服务器：需要明确指定
+    console.error(`❌ 一键模式需要指定部署目标: ${serverNames.join(' | ')}`);
+    console.error(`用法: fe-build deploy [${serverNames.join('|')}] --yes`);
+    process.exit(1);
   } else {
     // 交互式选择
     console.log('\n========================================');
@@ -283,7 +306,7 @@ async function deployCommand(config) {
 
   // 确定发布模式
   // 优先级：命令行参数 > 配置文件 deployMode > 自动识别
-  let deployMode = 'main'; // 默认值
+  let deployMode = 'simple'; // 默认改为 simple（一键发布）
 
   // 1. 命令行参数优先
   if (useTestBranch) {
@@ -296,8 +319,12 @@ async function deployCommand(config) {
     // 2. 使用配置文件的 deployMode
     deployMode = config.deployMode;
     console.log(`\n📌 使用配置文件发布模式: ${deployMode}`);
+  } else if (yesMode) {
+    // 3. 一键模式默认使用 simple
+    deployMode = 'simple';
+    console.log('\n📌 一键模式：使用 simple 发布模式');
   } else {
-    // 3. 自动根据部署环境选择发布模式（仅当配置文件未设置时）
+    // 4. 自动根据部署环境选择发布模式（仅当配置文件未设置时）
     const targetEnv = selectedServers[0];
     if (targetEnv === 'test') {
       deployMode = 'test';
@@ -313,6 +340,46 @@ async function deployCommand(config) {
   const localBackupDir = config.localBackupDir || 'D:\\备份';
   const logger = new DeployLogger({ logDir, localBackupDir });
   logger.start();
+
+  // ====== 部署前预检（可通过 --skip-check 跳过）======
+  if (!skipCheck) {
+    console.log('\n========================================');
+    console.log('  🔍 部署前环境预检');
+    console.log('========================================');
+
+    // 对每个目标服务器执行预检
+    let allCanDeploy = true;
+    for (const serverName of selectedServers) {
+      const envConfig = getServerConfig(config, serverName);
+      const { canDeploy, failCount, warnCount } = await runPreflightChecks({
+        environment: serverName,
+        envConfig,
+        config,
+        quick: false
+      });
+
+      if (!canDeploy) {
+        allCanDeploy = false;
+        console.error(`❌ ${serverName} 预检未通过，请修复阻断项后重试`);
+        if (!yesMode) {
+          const continueAnyway = await prompt('是否忽略错误继续部署? (y/n): ');
+          if (continueAnyway.toLowerCase() !== 'y') {
+            logger.end('failed');
+            process.exit(1);
+          }
+        } else {
+          logger.end('failed');
+          process.exit(1);
+        }
+      }
+    }
+
+    if (allCanDeploy) {
+      console.log('✅ 所有环境预检通过\n');
+    }
+  } else {
+    console.log('\n⚠️  已跳过环境预检 (--skip-check)\n');
+  }
 
   // 执行分支发布流程
   let branchResult = null;
@@ -333,6 +400,10 @@ async function deployCommand(config) {
         mergeChanges = true;
       } else if (useNoMerge) {
         mergeChanges = false;
+      } else if (yesMode) {
+        // 一键模式：默认 stash（安全，不自动提交）
+        mergeChanges = false;
+        console.log('📌 一键模式：默认使用 stash 储藏本地改动');
       }
 
       branchResult = await executeTestBranchFlow({
@@ -356,11 +427,15 @@ async function deployCommand(config) {
       console.log(`主分支: ${branches.main}`);
       console.log('========================================');
 
-      const confirmAnswer = await prompt('确认执行主分支发布流程? (y/n): ');
-      if (confirmAnswer.toLowerCase() !== 'y') {
-        console.log('已取消发布');
-        logger.end('cancelled');
-        process.exit(0);
+      if (yesMode) {
+        console.log('📌 一键模式：自动确认主分支发布流程');
+      } else {
+        const confirmAnswer = await prompt('确认执行主分支发布流程? (y/n): ');
+        if (confirmAnswer.toLowerCase() !== 'y') {
+          console.log('已取消发布');
+          logger.end('cancelled');
+          process.exit(0);
+        }
       }
 
       branchResult = executeMainBranchFlow({
@@ -377,6 +452,11 @@ async function deployCommand(config) {
       originalBranch = branchResult.currentBranch;
       needRestore = false;
       console.log('📌 当前分支发布模式：不切换分支');
+    } else if (deployMode === 'simple') {
+      // simple 发布模式（最简单，推荐）
+      branchResult = executeSimpleFlow(logger);
+      originalBranch = branchResult.currentBranch;
+      needRestore = false;
     }
   } catch (branchError) {
     // 分支流程失败，发送钉钉通知
@@ -503,6 +583,12 @@ async function deployCommand(config) {
       console.log('\n📌 自动切回原分支...');
       restoreBranch(originalBranch, false, logger);
       console.log(`✅ 已切回 ${originalBranch}，可继续开发`);
+    } else if (yesMode) {
+      // 一键模式 + stash 模式：不自动切回，提示用户
+      if (hasStash) {
+        console.log('\n💡 一键模式：不自动切回原分支');
+        console.log(`   本地改动已储藏，执行以下命令恢复: git stash pop`);
+      }
     } else {
       // stash 模式：询问是否切回
       const returnAnswer = await prompt('\n是否切回原分支? (y/n): ');
@@ -534,6 +620,7 @@ async function rollbackCommand(config) {
   const specifiedVersion = versionIndex !== -1 ? args[versionIndex + 1] : undefined;
   const useLocalBackup = args.includes('--local'); // 是否使用本地备份
   const useServerBackup = args.includes('--server'); // 是否使用服务器备份
+  const yesMode = args.includes('--yes') || args.includes('-y');
 
   if (!environment || !serverNames.includes(environment)) {
     console.error(`❌ 请指定服务器: ${serverNames.join(' 或 ')}`);
@@ -604,52 +691,63 @@ async function rollbackCommand(config) {
       } else if (useServerBackup && serverBackups.length > 0) {
         backupSource = 'server';
       } else if (!useLocalBackup && !useServerBackup) {
-        // 交互选择备份来源（默认服务器）
-        console.log('\n========================================');
-        console.log('  📦 选择备份来源');
-        console.log('========================================');
-        console.log(`  1. 服务器备份 (${serverBackups.length} 个) - 默认`);
-        if (localBackups.length > 0) {
-          console.log(`  2. 本地备份 (${localBackups.length} 个)`);
-        }
-        console.log('========================================');
-
-        const sourceAnswer = await prompt(`请选择备份来源 (1${localBackups.length > 0 ? '/2' : ''}): `);
-        if (sourceAnswer === '2' && localBackups.length > 0) {
-          backupSource = 'local';
-        } else {
+        if (yesMode) {
+          // 一键模式：默认服务器备份
           backupSource = 'server';
+          console.log('\n📌 一键模式：默认使用服务器备份');
+        } else {
+          // 交互选择备份来源（默认服务器）
+          console.log('\n========================================');
+          console.log('  📦 选择备份来源');
+          console.log('========================================');
+          console.log(`  1. 服务器备份 (${serverBackups.length} 个) - 默认`);
+          if (localBackups.length > 0) {
+            console.log(`  2. 本地备份 (${localBackups.length} 个)`);
+          }
+          console.log('========================================');
+
+          const sourceAnswer = await prompt(`请选择备份来源 (1${localBackups.length > 0 ? '/2' : ''}): `);
+          if (sourceAnswer === '2' && localBackups.length > 0) {
+            backupSource = 'local';
+          } else {
+            backupSource = 'server';
+          }
         }
       }
 
       // 显示备份列表供选择
       const backups = backupSource === 'server' ? serverBackups : localBackups;
-      
-      console.log(`\n========================================`);
-      console.log(`  📦 ${backupSource === 'server' ? '服务器' : '本地'}备份列表`);
-      console.log(`========================================`);
-      
-      backups.forEach((backup, index) => {
-        const sizeStr = backup.size ? ` (${formatFileSize(backup.size)})` : '';
-        const timeStr = backup.mtime ? ` - ${backup.mtime.toLocaleDateString('zh-CN')}` : '';
-        console.log(`  ${index + 1}. ${backup.version}${sizeStr}${timeStr}`);
-      });
-      console.log(`========================================`);
 
-      const backupAnswer = await prompt(`请选择要回滚的备份 (1-${backups.length}): `);
-      const selectedIndex = parseInt(backupAnswer, 10) - 1;
+      if (yesMode) {
+        // 一键模式：自动选择最新的备份
+        selectedBackup = backups[0];
+        console.log(`\n📌 一键模式：自动选择最新备份 — ${selectedBackup.version}`);
+      } else {
+        console.log(`\n========================================`);
+        console.log(`  📦 ${backupSource === 'server' ? '服务器' : '本地'}备份列表`);
+        console.log(`========================================`);
 
-      if (selectedIndex < 0 || selectedIndex >= backups.length) {
-        console.error('❌ 无效选择');
-        await ssh.disconnect();
-        logger.end('failed');
-        process.exit(1);
+        backups.forEach((backup, index) => {
+          const sizeStr = backup.size ? ` (${formatFileSize(backup.size)})` : '';
+          const timeStr = backup.mtime ? ` - ${backup.mtime.toLocaleDateString('zh-CN')}` : '';
+          console.log(`  ${index + 1}. ${backup.version}${sizeStr}${timeStr}`);
+        });
+        console.log(`========================================`);
+
+        const backupAnswer = await prompt(`请选择要回滚的备份 (1-${backups.length}): `);
+        const selectedIndex = parseInt(backupAnswer, 10) - 1;
+
+        if (selectedIndex < 0 || selectedIndex >= backups.length) {
+          console.error('❌ 无效选择');
+          await ssh.disconnect();
+          logger.end('failed');
+          process.exit(1);
+        }
+
+        selectedBackup = backups[selectedIndex];
+        console.log(`\n已选择: ${selectedBackup.version}`);
       }
-
-      selectedBackup = backups[selectedIndex];
       backupFile = selectedBackup.file;
-      
-      console.log(`\n已选择: ${selectedBackup.version}`);
       logger.log('INFO', '选择备份', `来源: ${backupSource}, 版本: ${selectedBackup.version}`);
     }
 
@@ -749,6 +847,69 @@ async function checkUpdateOnStart() {
 }
 
 /**
+ * 初始化命令
+ */
+async function initCommand() {
+  await runInit({ cwd: process.cwd() });
+  process.exit(0);
+}
+
+/**
+ * 环境检查命令
+ */
+async function checkCommand() {
+  // 加载配置
+  const config = await loadConfig();
+  const serverNames = getServerNames(config);
+
+  if (serverNames.length === 0) {
+    console.error('❌ 配置文件中没有找到服务器配置');
+    process.exit(1);
+  }
+
+  const args = process.argv.slice(2);
+  const environment = args.find(arg => arg !== 'check' && !arg.startsWith('--'));
+
+  if (!environment || !serverNames.includes(environment)) {
+    // 没有指定环境，检查所有
+    console.log(`\n🔍 未指定环境，检查所有服务器: ${serverNames.join(', ')}`);
+    let allPassed = true;
+    for (const name of serverNames) {
+      const envConfig = getServerConfig(config, name);
+      const { canDeploy } = await runPreflightChecks({
+        environment: name,
+        envConfig,
+        config,
+        quick: false
+      });
+      if (!canDeploy) allPassed = false;
+    }
+    if (!allPassed) {
+      console.error('❌ 部分环境预检未通过');
+      process.exit(1);
+    }
+    console.log('✅ 所有环境预检通过');
+  } else {
+    const envConfig = getServerConfig(config, environment);
+    if (!envConfig || !envConfig.sshHost) {
+      console.error(`❌ ${environment} 配置不完整`);
+      process.exit(1);
+    }
+    const { canDeploy } = await runPreflightChecks({
+      environment,
+      envConfig,
+      config,
+      quick: false
+    });
+    if (!canDeploy) {
+      process.exit(1);
+    }
+  }
+
+  process.exit(0);
+}
+
+/**
  * 主入口
  */
 async function main() {
@@ -794,8 +955,20 @@ async function main() {
     process.exit(0);
   }
 
+  // init 命令不需要检查更新和加载配置
+  if (command === 'init') {
+    await initCommand();
+    return;
+  }
+
   // 其他命令启动时检查更新（静默检查）
   await checkUpdateOnStart();
+
+  // check 命令需要加载配置但不需要部署
+  if (command === 'check') {
+    await checkCommand();
+    return;
+  }
 
   // 加载配置
   const config = await loadConfig();

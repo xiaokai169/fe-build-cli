@@ -632,6 +632,59 @@ async function executeTestStashFlow(originalBranch, testBranch, logger = null) {
 }
 
 /**
+ * 执行 simple 发布流程（最简单模式）
+ * 直接从当前分支构建部署，不做任何分支切换或合并
+ * 适用场景：个人项目、小团队、紧急修复发布
+ * @param {DeployLogger} logger - 日志记录器（可选）
+ * @returns {object} 执行结果
+ */
+export function executeSimpleFlow(logger = null) {
+  const currentBranch = getCurrentBranch();
+  const gitSha = getGitSha();
+
+  console.log('\n========================================');
+  console.log('  🌿 简单发布模式 (Simple)');
+  console.log('========================================');
+  console.log(`当前分支: ${currentBranch}`);
+  console.log(`提交 SHA: ${gitSha}`);
+  console.log('模式说明: 直接从当前分支构建部署，不做分支切换');
+  console.log('========================================');
+
+  // 检查工作区（仅警告，不阻断）
+  const { clean, changes } = checkUncommittedChanges();
+  if (!clean) {
+    console.log('\n⚠️  工作区有未提交的改动:');
+    changes.forEach(change => console.log(`  ${change}`));
+    console.log('  这些改动会被包含在构建中\n');
+    if (logger) {
+      logger.log('WARN', '工作区检查', `存在 ${changes.length} 个未提交改动（简单模式不阻断）`);
+    }
+  }
+
+  // 拉取最新代码
+  console.log('\n📥 拉取最新代码...');
+  try {
+    execSync(`git pull origin ${currentBranch}`, { stdio: 'inherit' });
+    console.log('✅ 已拉取最新代码');
+  } catch {
+    console.warn('⚠️  拉取失败，继续使用本地代码');
+  }
+
+  if (logger) {
+    logger.log('INFO', '简单发布模式', `当前分支: ${currentBranch}, SHA: ${gitSha}, 干净: ${clean}`);
+  }
+
+  return {
+    success: true,
+    originalBranch: currentBranch,
+    currentBranch,
+    gitSha,
+    needRestore: false,
+    hasStash: false
+  };
+}
+
+/**
  * 发布后切回原分支
  * @param {string} originalBranch - 原分支名
  * @param {boolean} hasStash - 是否有储藏的改动
@@ -665,5 +718,6 @@ export default {
   executeMainBranchFlow,
   executeCurrentBranchFlow,
   executeTestBranchFlow,
+  executeSimpleFlow,
   restoreBranch
 };
