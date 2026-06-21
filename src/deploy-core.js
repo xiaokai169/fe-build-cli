@@ -279,7 +279,7 @@ export async function pipeUploadDeploy(options) {
   };
 
   if (distRawSize > 0) {
-    console.log(`  dist 原始: ${formatBytes(distRawSize)}，压缩传输中...`);
+    console.log(`  dist: ${formatBytes(distRawSize)}`);
   }
 
   try {
@@ -312,7 +312,7 @@ export async function pipeUploadDeploy(options) {
           lastUpdate = now;
           const elapsed = (now - startTime) / 1000;
           const speed = elapsed > 0 ? bytesTransferred / elapsed : 0;
-          // 动画进度条：显示已传压缩数据 + dist 原始大小参考
+          // 进度条：已传 / 总数 / 速度
           const barW = 20;
           const tick = Math.floor((elapsed * 4) % barW);
           const bar = '░'.repeat(tick) + '█' + '░'.repeat(Math.max(0, barW - tick - 1));
@@ -335,10 +335,7 @@ export async function pipeUploadDeploy(options) {
         if (code === 0) {
           const elapsed = (Date.now() - startTime) / 1000;
           const bar = '█'.repeat(20);
-          const ratio = distRawSize > 0
-            ? `  (压缩率 ${Math.round((bytesTransferred / distRawSize) * 100)}%)`
-            : '';
-          process.stdout.write(`\r  [${bar}] ${formatBytes(bytesTransferred)}  完成 ${Math.round(elapsed)}s${ratio}                    \n`);
+          process.stdout.write(`\r  [${bar}] ${formatBytes(bytesTransferred)}  完成 ${Math.round(elapsed)}s                    \n`);
           resolve(bytesTransferred);
         } else {
           reject(new Error(`SSH 退出码: ${code}${sshStderr ? ', stderr: ' + sshStderr.trim() : ''}`));
