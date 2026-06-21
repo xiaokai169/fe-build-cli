@@ -300,12 +300,20 @@ export async function pipeUploadDeploy(options) {
           lastUpdate = now;
           const elapsed = (now - startTime) / 1000;
           const speed = elapsed > 0 ? bytesTransferred / elapsed : 0;
-          // 进度条：已传 / 总数（都是压缩后数据）/ 速度
           const barW = 20;
-          const tick = Math.floor((elapsed * 4) % barW);
-          const bar = '░'.repeat(tick) + '█' + '░'.repeat(Math.max(0, barW - tick - 1));
-          const totalStr = totalCompressed > 0 ? ` / ${formatBytes(totalCompressed)}` : '';
-          process.stdout.write(`\r  [${bar}] ${formatBytes(bytesTransferred)}${totalStr}  ${formatBytes(speed)}/s  ${Math.round(elapsed)}s`);
+          let bar;
+          if (totalCompressed > 0) {
+            // 总数已知 → 真实百分比进度条
+            const pct = Math.min(100, Math.round((bytesTransferred / totalCompressed) * 100));
+            const filled = Math.round((pct / 100) * barW);
+            bar = '█'.repeat(filled) + '░'.repeat(barW - filled);
+            process.stdout.write(`\r  [${bar}] ${pct}%  ${formatBytes(bytesTransferred)} / ${formatBytes(totalCompressed)}  ${formatBytes(speed)}/s  ${Math.round(elapsed)}s`);
+          } else {
+            // 总数未知（tar 还在压缩）→ 动画滑块
+            const tick = Math.floor((elapsed * 4) % barW);
+            bar = '░'.repeat(tick) + '█' + '░'.repeat(Math.max(0, barW - tick - 1));
+            process.stdout.write(`\r  [${bar}] ${formatBytes(bytesTransferred)}  ${formatBytes(speed)}/s  ${Math.round(elapsed)}s`);
+          }
         }
       });
 
@@ -322,8 +330,7 @@ export async function pipeUploadDeploy(options) {
       sshProc.on('close', (code) => {
         if (code === 0) {
           const elapsed = (Date.now() - startTime) / 1000;
-          const bar = '█'.repeat(20);
-          process.stdout.write(`\r  [${bar}] ${formatBytes(bytesTransferred)}  完成 ${Math.round(elapsed)}s                    \n`);
+          process.stdout.write(`\r  传输完成: ${formatBytes(bytesTransferred)}  ${Math.round(elapsed)}s                    \n`);
           resolve(bytesTransferred);
         } else {
           reject(new Error(`SSH 退出码: ${code}${sshStderr ? ', stderr: ' + sshStderr.trim() : ''}`));
