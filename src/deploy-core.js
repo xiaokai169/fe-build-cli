@@ -255,14 +255,25 @@ export async function pipeUploadDeploy(options) {
     .replace(/\\/g, '/');
   const sshTarget = `${envConfig.sshUser}@${envConfig.sshHost}`;
 
-  const startTime = Date.now();
-
   // 格式化
   const formatBytes = (bytes) => {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
   };
+
+  // 预取压缩后大小（本地压缩 + wc -c，只跑 CPU 不走网络）
+  let totalCompressed = 0;
+  try {
+    process.stdout.write('  预计算压缩大小...');
+    const result = execSync('tar -czf - -C dist . | wc -c', { encoding: 'utf-8' });
+    totalCompressed = parseInt(result.trim(), 10);
+    process.stdout.write(`\r  ${formatBytes(totalCompressed)}（压缩后），开始传输...\n`);
+  } catch {
+    console.log('  无法预计算，传输中将自动捕获');
+  }
+
+  const startTime = Date.now();
 
   try {
     await new Promise((resolve, reject) => {
@@ -282,15 +293,9 @@ export async function pipeUploadDeploy(options) {
       const sshProc = spawn('ssh', sshArgs);
 
       let bytesTransferred = 0;
-      let totalCompressed = 0;   // 压缩后总大小（tar 结束时确定）
       let lastUpdate = Date.now();
 
       tar.stdout.pipe(sshProc.stdin);
-
-      // tar 压缩结束 → 捕获压缩后总大小
-      tar.stdout.on('end', () => {
-        totalCompressed = bytesTransferred;
-      });
 
       tar.stdout.on('data', (chunk) => {
         bytesTransferred += chunk.length;
@@ -301,17 +306,14 @@ export async function pipeUploadDeploy(options) {
           const elapsed = (now - startTime) / 1000;
           const speed = elapsed > 0 ? bytesTransferred / elapsed : 0;
           const barW = 20;
-          let bar;
           if (totalCompressed > 0) {
-            // 总数已知 → 真实百分比进度条
             const pct = Math.min(100, Math.round((bytesTransferred / totalCompressed) * 100));
             const filled = Math.round((pct / 100) * barW);
-            bar = '█'.repeat(filled) + '░'.repeat(barW - filled);
+            const bar = '█'.repeat(filled) + '░'.repeat(barW - filled);
             process.stdout.write(`\r  [${bar}] ${pct}%  ${formatBytes(bytesTransferred)} / ${formatBytes(totalCompressed)}  ${formatBytes(speed)}/s  ${Math.round(elapsed)}s`);
           } else {
-            // 总数未知（tar 还在压缩）→ 动画滑块
             const tick = Math.floor((elapsed * 4) % barW);
-            bar = '░'.repeat(tick) + '█' + '░'.repeat(Math.max(0, barW - tick - 1));
+            const bar = '░'.repeat(tick) + '█' + '░'.repeat(Math.max(0, barW - tick - 1));
             process.stdout.write(`\r  [${bar}] ${formatBytes(bytesTransferred)}  ${formatBytes(speed)}/s  ${Math.round(elapsed)}s`);
           }
         }
