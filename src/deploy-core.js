@@ -251,7 +251,7 @@ export async function rsyncUploadDeploy(options) {
   const sshKeyPath = envConfig.sshKeyPath
     .replace(/^~/, process.env.HOME || process.env.USERPROFILE || '/root')
     .replace(/\\/g, '/'); // Windows: 将反斜杠转为正斜杠，防止 shell 转义
-  const sshOpts = `ssh -i "${sshKeyPath}" -p ${sshPort} -o StrictHostKeyChecking=no -o ConnectTimeout=15`;
+  const rshCmd = `ssh -i "${sshKeyPath}" -p ${sshPort} -o StrictHostKeyChecking=no -o ConnectTimeout=15`;
   const remoteTarget = `${envConfig.sshUser}@${envConfig.sshHost}:${mirrorDir}`;
 
   // ====== A. rsync 增量同步 ======
@@ -264,10 +264,10 @@ export async function rsyncUploadDeploy(options) {
     // 确保镜像目录存在
     await ssh.execCommand(`mkdir -p ${mirrorDir}`);
 
-    // 执行 rsync (本地命令, 通过 SSH 传输)
+    // 使用 RSYNC_RSH 环境变量避免 -e 参数中的引号嵌套问题 (Windows 兼容)
     execSync(
-      `rsync -avz --delete --no-perms --no-owner --no-group -e "${sshOpts}" ./dist/ ${remoteTarget}/`,
-      { stdio: 'inherit' }
+      `rsync -avz --delete --no-perms --no-owner --no-group ./dist/ ${remoteTarget}/`,
+      { stdio: 'inherit', env: { ...process.env, RSYNC_RSH: rshCmd } }
     );
 
     const rsyncDuration = Math.round((Date.now() - rsyncStartTime) / 1000);
