@@ -6,25 +6,6 @@ import SSHClient from './ssh-client.js';
 import { DeployLogger, cleanLocalBackups } from './logger.js';
 
 /**
- * 递归计算目录大小（跨平台，不依赖 du 命令）
- * @param {string} dirPath - 目录路径
- * @returns {number} 字节数
- */
-function getDirSize(dirPath) {
-  let total = 0;
-  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(dirPath, entry.name);
-    if (entry.isDirectory()) {
-      total += getDirSize(fullPath);
-    } else if (entry.isFile()) {
-      total += fs.statSync(fullPath).size;
-    }
-  }
-  return total;
-}
-
-/**
  * 获取服务器备份列表
  * @param {SSHClient} ssh - SSH 客户端
  * @param {object} envConfig - 环境配置
@@ -279,14 +260,6 @@ export async function pipeUploadDeploy(options) {
     .replace(/\\/g, '/');
   const sshTarget = `${envConfig.sshUser}@${envConfig.sshHost}`;
 
-  // 计算 dist 目录大小（用于估算进度）
-  let distSize = 0;
-  try {
-    distSize = getDirSize('dist');
-  } catch {
-    // 无法获取大小，不显示进度百分比
-  }
-
   const startTime = Date.now();
 
   // 格式化
@@ -300,10 +273,12 @@ export async function pipeUploadDeploy(options) {
     await new Promise((resolve, reject) => {
       const tar = spawn('tar', ['-czf', '-', '-C', 'dist', '.']);
       const sshArgs = [
+        '-T',  // 禁用伪终端，避免服务器登录 shell 的 stderr 混入
         '-i', sshKeyPath,
         '-p', String(sshPort),
         '-o', 'StrictHostKeyChecking=no',
         '-o', 'ConnectTimeout=15',
+        '-o', 'LogLevel=QUIET',
         sshTarget,
         `tar -xzf - -C ${envConfig.deployDir}`
       ];
@@ -322,13 +297,7 @@ export async function pipeUploadDeploy(options) {
           lastUpdate = now;
           const elapsed = (now - startTime) / 1000;
           const speed = elapsed > 0 ? bytesTransferred / elapsed : 0;
-          if (distSize > 0) {
-            const pct = Math.min(99, Math.round((bytesTransferred / (distSize * 0.5)) * 100));
-            const bar = '█'.repeat(Math.round(pct / 3)) + '░'.repeat(33 - Math.round(pct / 3));
-            process.stdout.write(`\r  传输进度: [${bar}] ${pct}%  ${formatBytes(bytesTransferred)}  ${formatBytes(speed)}/s`);
-          } else {
-            process.stdout.write(`\r  传输中... ${formatBytes(bytesTransferred)}  ${formatBytes(speed)}/s (${Math.round(elapsed)}s)`);
-          }
+          process.stdout.write(`\r  已传输: ${formatBytes(bytesTransferred)}  ${formatBytes(speed)}/s  (${Math.round(elapsed)}s)`);
         }
       });
 
@@ -343,7 +312,7 @@ export async function pipeUploadDeploy(options) {
       sshProc.on('close', (code) => {
         if (code === 0) {
           const elapsed = (Date.now() - startTime) / 1000;
-          process.stdout.write(`\r  传输进度: ${formatBytes(bytesTransferred)} 完成 (${Math.round(elapsed)}s)                    \n`);
+          process.stdout.write(`\r  已传输: ${formatBytes(bytesTransferred)}  完成 (${Math.round(elapsed)}s)                    \n`);
           resolve(bytesTransferred);
         } else {
           reject(new Error(`SSH 退出码: ${code}`));
