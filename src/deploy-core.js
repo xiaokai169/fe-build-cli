@@ -402,8 +402,14 @@ async function swapDeployDir({ ssh, envConfig, tmpDeployDir, protectedDirs }) {
       `${findCmd}find ${tmpDeployDir} -maxdepth 1 -mindepth 1 -exec mv {} ${envConfig.deployDir}/ \\; 2>/dev/null; rm -rf ${tmpDeployDir}`
     );
   } else {
-    // 无受保护目录：直接原子替换（rm + mv，同一文件系统极快）
-    await ssh.execCommand(`rm -rf ${envConfig.deployDir} && mv ${tmpDeployDir} ${envConfig.deployDir}`);
+    // 无受保护目录：先确保目录存在，删除内容，再移入新文件（避免删除整个目录导致父目录权限问题）
+    await ssh.execCommand(
+      `mkdir -p ${envConfig.deployDir} 2>/dev/null; ` +
+      `rm -rf ${envConfig.deployDir}/* 2>/dev/null; ` +
+      `rm -rf ${envConfig.deployDir}/.[!.]* 2>/dev/null; ` +
+      `find ${tmpDeployDir} -maxdepth 1 -mindepth 1 -exec mv {} ${envConfig.deployDir}/ \\; 2>/dev/null; ` +
+      `rm -rf ${tmpDeployDir}`
+    );
   }
 }
 
