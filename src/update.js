@@ -3,6 +3,7 @@ import process from 'node:process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { devNull } from './utils.js';
 
 /**
  * 更新模块
@@ -39,9 +40,9 @@ export function getCurrentVersion() {
  */
 export async function getLatestVersion() {
   try {
-    // 使用 --silent 参数避免显示 npm 警告
-    const result = execSync('npm view fe-build-cli version --silent 2>nul', { 
-      encoding: 'utf-8', 
+    const nullDevice = devNull();
+    const result = execSync(`npm view fe-build-cli version --silent 2>${nullDevice}`, {
+      encoding: 'utf-8',
       timeout: 10000,
       stdio: ['pipe', 'pipe', 'pipe'] // 隐藏 stderr
     });
@@ -58,9 +59,9 @@ export async function getLatestVersion() {
 export async function checkForUpdate() {
   const currentVersion = await getCurrentVersion();
   const latestVersion = await getLatestVersion();
-  
+
   const hasUpdate = currentVersion !== latestVersion && latestVersion !== '未知';
-  
+
   return {
     currentVersion,
     latestVersion,
@@ -76,19 +77,19 @@ export async function checkForUpdate() {
 export async function performUpdate(global = true) {
   try {
     console.log('\n正在更新 fe-build-cli...');
-    
-    const command = global 
+
+    const command = global
       ? 'npm update fe-build-cli --global'
       : 'npm update fe-build-cli';
-    
+
     execSync(command, { stdio: 'inherit', timeout: 60000 });
-    
+
     console.log('\n✅ 更新完成!');
-    
+
     // 显示更新后的版本
     const newVersion = await getLatestVersion();
     console.log(`当前版本: ${newVersion}`);
-    
+
     return true;
   } catch (error) {
     console.error('\n❌ 更新失败:', error.message);
@@ -105,13 +106,13 @@ export async function showUpdateInfo() {
   console.log('\n========================================');
   console.log('  🔄 fe-build-cli 版本检查');
   console.log('========================================');
-  
+
   try {
     const info = await checkForUpdate();
-    
+
     console.log(`当前版本: ${info.currentVersion}`);
     console.log(`最新版本: ${info.latestVersion}`);
-    
+
     if (info.hasUpdate) {
       console.log('\n📌 发现新版本!');
       console.log('\n更新方法:');
@@ -120,9 +121,9 @@ export async function showUpdateInfo() {
     } else {
       console.log('\n✅ 已是最新版本');
     }
-    
+
     console.log('========================================');
-    
+
     return info;
   } catch (error) {
     console.error('❌ 检查更新失败:', error.message);

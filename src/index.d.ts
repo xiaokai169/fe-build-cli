@@ -1,342 +1,276 @@
 /**
- * fe-build-cli 类型定义
+ * fe-build-cli TypeScript 类型声明
  */
 
-/**
- * 服务器配置
- */
+// ====== 公共工具 ======
+export function formatBytes(bytes: number): string;
+export function formatFileSize(bytes: number): string;
+export function shellEscape(value: string): string;
+export function parseBackupFilename(filename: string): { prefix: string; version: string } | null;
+export function formatTime(date: Date): string;
+export function expandTilde(filePath: string): string;
+export function isWindows(): boolean;
+export function devNull(): string;
+
+// ====== 配置 ======
 export interface ServerConfig {
-  /** SSH 服务器地址 */
   sshHost: string;
-  /** SSH 用户名 */
   sshUser: string;
-  /** SSH 私钥路径 */
-  sshKeyPath: string;
-  /** SSH 端口（默认 22） */
   sshPort?: number;
-  /** 部署后的访问地址 */
-  deployUrl: string;
-  /** 备份目录 */
+  sshKeyPath: string;
+  deployUrl?: string;
   backupDir: string;
-  /** 部署目录 */
   deployDir: string;
-  /** 备份文件前缀 */
   backupPrefix: string;
-  /** 构建模式：production 或 test */
   buildMode?: 'production' | 'test';
-  /** 自定义构建命令 */
   buildCommand?: string;
-  /** 需要保护的目录（部署时不会被删除） */
   protectedDirs?: string[];
+  backupRetentionCount?: number;
 }
 
-/**
- * 分支配置
- */
-export interface BranchesConfig {
-  /** 测试分支名 */
-  test: string;
-  /** 主分支名 */
-  main: string;
+export interface FeBuildConfig {
+  branches?: { test: string; main: string };
+  deployMode?: 'simple' | 'current';
+  dingtalk?: DingtalkConfig;
+  servers: Record<string, ServerConfig>;
+  backupRetentionCount?: number;
+  logDir?: string;
+  enableBackupDownload?: boolean;
+  localBackupDir?: string;
 }
 
-/**
- * 钉钉通知配置
- */
 export interface DingtalkConfig {
-  /** 钉钉机器人 webhook URL */
   webhook: string;
-  /** 是否启用钉钉通知，默认 true */
   enabled?: boolean;
-  /** 安全设置关键词（如果机器人设置了关键词，必须配置此项） */
   keyword?: string;
 }
 
-/**
- * fe-build-cli 配置
- */
-export interface FeBuildConfig {
-  /** 分支配置 */
-  branches?: BranchesConfig;
-  /** 发布模式：main（主分支发布）或 current（当前分支发布） */
-  deployMode?: 'main' | 'current';
-  /** 钉钉通知配置 */
-  dingtalk?: DingtalkConfig;
-  /** 服务器配置 */
-  servers: Record<string, ServerConfig>;
-  /** 备份保留数量 */
-  backupRetentionCount?: number;
-  /** 日志目录 */
-  logDir?: string;
-  /** 是否启用备份下载，默认 true */
-  enableBackupDownload?: boolean;
-  /** 本地备份目录 */
-  localBackupDir?: string;
-}
-
-/**
- * 部署选项
- */
-export interface DeployOptions {
-  /** 环境名称 */
-  environment: string;
-  /** 环境配置 */
-  envConfig: ServerConfig;
-  /** 构建版本 */
-  buildVersion: string;
-  /** 是否跳过构建 */
-  skipBuild?: boolean;
-  /** 是否跳过本地清理 */
-  skipLocalCleanup?: boolean;
-  /** 本地备份目录 */
-  localBackupDir?: string;
-  /** 是否启用备份下载 */
-  enableBackupDownload?: boolean;
-}
-
-/**
- * 回滚选项
- */
-export interface RollbackOptions {
-  /** 环境名称 */
-  environment: string;
-  /** 环境配置 */
-  envConfig: ServerConfig;
-  /** 指定版本（可选） */
-  specifiedVersion?: string;
-}
-
-/**
- * 主分支发布流程选项
- */
-export interface MainBranchFlowOptions {
-  /** 测试分支名 */
-  testBranch: string;
-  /** 主分支名 */
-  mainBranch: string;
-  /** 是否推送到远程 */
-  pushToRemote?: boolean;
-}
-
-/**
- * 分支流程执行结果
- */
-export interface BranchFlowResult {
-  /** 是否成功 */
-  success: boolean;
-  /** 原始分支 */
-  originalBranch: string;
-  /** 当前分支 */
-  currentBranch: string;
-  /** 测试分支（主分支模式） */
-  testBranch?: string;
-  /** 主分支（主分支模式） */
-  mainBranch?: string;
-  /** Git SHA（当前分支模式） */
-  gitSha?: string;
-}
-
-/**
- * SSH 客户端类
- */
+// ====== SSH 客户端 ======
 export class SSHClient {
   constructor(config: ServerConfig);
   connect(): Promise<void>;
   execCommand(command: string): Promise<string>;
   uploadFile(localPath: string, remotePath: string): Promise<void>;
+  downloadFile(remotePath: string, localPath: string): Promise<void>;
   disconnect(): Promise<void>;
 }
 
-/**
- * 部署函数
- */
-export function deployToServer(options: DeployOptions): Promise<void>;
+// ====== Git 信息查询 ======
+export function getCurrentBranch(): string;
+export function getGitSha(): string;
+export function getGitCommitMessage(): string;
+export function getGitCommitMessages(count?: number): string;
+export function isWorkingTreeClean(): boolean;
+export function checkUncommittedChanges(): { clean: boolean; changes: string[] };
+export function executeCurrentBranchFlow(): { success: boolean; currentBranch: string; gitSha: string };
+export function executeSimpleFlow(): { success: boolean; currentBranch: string; gitSha: string; clean: boolean };
 
-/**
- * 回滚函数
- */
-export function rollbackDeployment(options: RollbackOptions): Promise<void>;
+// ====== 部署核心 ======
+export function getServerBackupList(ssh: SSHClient, envConfig: ServerConfig): Promise<BackupFile[]>;
+export function getLocalBackupList(localBackupDir: string, backupPrefix: string): BackupFile[];
+export function rollbackFromLocal(options: RollbackLocalOpts): Promise<string>;
+export function buildProject(envConfig: ServerConfig, buildVersion: string, logger: DeployLogger): void;
+export function verifyBuildOutput(skipBuild: boolean, logger: DeployLogger): void;
+export function compressBuild(localZipFile: string, logger: DeployLogger): void;
+export function backupExistingDeployment(options: BackupOpts): Promise<void>;
+export function pipeUploadDeploy(options: PipeDeployOpts): Promise<void>;
+export function uploadBuild(options: UploadOpts): Promise<void>;
+export function deployAndExtract(options: ExtractOpts): Promise<void>;
+export function cleanupFiles(options: CleanupOpts): Promise<void>;
+export function downloadBackup(options: DownloadBackupOpts): Promise<string | null>;
+export function deployToServer(options: DeployToServerOpts): Promise<void>;
+export function rollbackDeployment(options: RollbackDeployOpts): Promise<void>;
 
-/**
- * 构建项目
- */
-export function buildProject(envConfig: ServerConfig, buildVersion: string): void;
+export interface BackupFile {
+  file: string;
+  filename: string;
+  prefix?: string;
+  version: string;
+  mtime?: Date;
+  size?: number;
+  isServer: boolean;
+}
 
-/**
- * 验证构建输出
- */
-export function verifyBuildOutput(skipBuild: boolean): void;
-
-/**
- * 压缩构建产物
- */
-export function compressBuild(localZipFile: string, skipBuild: boolean): void;
-
-/**
- * 备份现有部署
- */
-export function backupExistingDeployment(options: {
+export interface PipeDeployOpts {
   ssh: SSHClient;
   envConfig: ServerConfig;
   buildVersion: string;
-  skipBuild: boolean;
-}): Promise<void>;
+  logger: DeployLogger;
+}
 
-/**
- * 上传构建产物
- */
-export function uploadBuild(
-  ssh: SSHClient,
-  localZipFile: string,
-  remoteZipFile: string,
-  skipBuild: boolean
-): Promise<void>;
+export interface BackupOpts extends PipeDeployOpts {
+  suffix?: string;
+}
 
-/**
- * 清理部署目录并解压新版本
- */
-export function deployAndExtract(options: {
+export interface UploadOpts {
+  ssh: SSHClient;
+  localZipFile: string;
+  remoteZipFile: string;
+  logger: DeployLogger;
+}
+
+export interface ExtractOpts {
   ssh: SSHClient;
   envConfig: ServerConfig;
   remoteZipFile: string;
-  skipBuild: boolean;
-}): Promise<void>;
+  logger: DeployLogger;
+}
 
-/**
- * 清理临时文件
- */
-export function cleanupFiles(options: {
+export interface CleanupOpts {
   ssh: SSHClient;
   remoteZipFile: string;
   localZipFile: string;
   skipLocalCleanup: boolean;
-  skipBuild: boolean;
-}): Promise<void>;
-
-/**
- * 获取当前 Git 分支名称
- */
-export function getCurrentBranch(): string;
-
-/**
- * 获取 Git 提交 SHA（短格式）
- */
-export function getGitSha(): string;
-
-/**
- * 检查工作区是否干净
- */
-export function isWorkingTreeClean(): boolean;
-
-/**
- * 检查是否有未提交的更改
- */
-export function checkUncommittedChanges(): { clean: boolean; changes: string[] };
-
-/**
- * 切换到指定分支
- */
-export function checkoutBranch(branchName: string): void;
-
-/**
- * 拉取远程分支最新代码
- */
-export function pullBranch(branchName: string): void;
-
-/**
- * 合并分支
- */
-export function mergeBranch(sourceBranch: string, targetBranch: string): boolean;
-
-/**
- * 推送分支到远程
- */
-export function pushBranch(branchName: string): void;
-
-/**
- * 执行主分支发布流程
- */
-export function executeMainBranchFlow(config: MainBranchFlowOptions): BranchFlowResult;
-
-/**
- * 执行当前分支发布流程
- */
-export function executeCurrentBranchFlow(): BranchFlowResult;
-
-/**
- * 发布后切回原分支
- */
-export function restoreBranch(originalBranch: string): void;
-
-/**
- * 钉钉通知结果
- */
-export interface DingtalkResult {
-  success: boolean;
-  data?: any;
-  error?: string;
+  logger: DeployLogger;
 }
 
-/**
- * 部署成功通知选项
- */
-export interface DeploySuccessNotificationOptions {
+export interface DownloadBackupOpts {
+  ssh: SSHClient;
+  envConfig: ServerConfig;
+  buildVersion: string;
+  localBackupDir: string;
+  logger: DeployLogger;
+}
+
+export interface DeployToServerOpts {
+  environment: string;
+  envConfig: ServerConfig;
+  buildVersion: string;
+  skipBuild?: boolean;
+  skipLocalCleanup?: boolean;
+  logger: DeployLogger;
+  localBackupDir?: string;
+  enableBackupDownload?: boolean;
+}
+
+export interface RollbackDeployOpts {
+  environment: string;
+  envConfig: ServerConfig;
+  specifiedVersion?: string;
+  backupFile?: string;
+  ssh?: SSHClient;
+  logger: DeployLogger;
+}
+
+export interface RollbackLocalOpts {
+  ssh: SSHClient;
+  envConfig: ServerConfig;
+  localBackupFile: string;
+  logger: DeployLogger;
+}
+
+// ====== 钉钉通知 ======
+export function sendDingTalkMessage(webhookUrl: string, message: object): Promise<DingTalkResult>;
+export function sendDeploySuccessNotification(webhookUrl: string, options: DeploySuccessOpts): Promise<DingTalkResult>;
+export function sendDeployFailureNotification(webhookUrl: string, options: DeployFailureOpts): Promise<DingTalkResult>;
+export function sendRollbackNotification(webhookUrl: string, options: RollbackNotifyOpts): Promise<DingTalkResult>;
+
+export interface DingTalkResult {
+  success: boolean;
+  error?: string;
+  data?: any;
+}
+
+export interface DeploySuccessOpts {
   environment: string;
   buildVersion: string;
   serverHost: string;
-  deployUrl: string;
+  deployUrl?: string;
   branch: string;
   deployMode: string;
+  commitMessage: string;
   duration?: string;
+  keyword?: string;
 }
 
-/**
- * 部署失败通知选项
- */
-export interface DeployFailureNotificationOptions {
+export interface DeployFailureOpts {
   environment: string;
-  buildVersion?: string;
+  buildVersion: string;
   serverHost: string;
   branch: string;
+  commitMessage: string;
   error: string;
+  keyword?: string;
 }
 
-/**
- * 回滚通知选项
- */
-export interface RollbackNotificationOptions {
+export interface RollbackNotifyOpts {
   environment: string;
   backupFile: string;
   serverHost: string;
-  deployUrl: string;
+  deployUrl?: string;
   success: boolean;
+  keyword?: string;
 }
 
-/**
- * 发送钉钉消息
- */
-export function sendDingTalkMessage(webhookUrl: string, message: any): Promise<DingtalkResult>;
+// ====== 日志记录 ======
+export class DeployLogger {
+  constructor(options?: { logDir?: string; backupDir?: string });
+  start(): void;
+  end(status?: string): void;
+  log(level: string, step: string, message: string, data?: any): void;
+  logBuild(buildMode: string, buildVersion: string, success: boolean, duration?: number): void;
+  logCompress(fileSize: number, success: boolean): void;
+  logSSHConnect(host: string, success: boolean): void;
+  logUpload(localFile: string, remoteFile: string, fileSize: number, duration: number, success: boolean): void;
+  logBackup(backupFile: string, success: boolean, isDownload?: boolean): void;
+  logDeploy(deployDir: string, success: boolean): void;
+  logDingTalk(success: boolean, message?: string): void;
+  saveLog(): string;
+  saveErrorLog(): string;
+  getSummary(): LogSummary;
+}
 
-/**
- * 发送部署成功通知
- */
-export function sendDeploySuccessNotification(
-  webhookUrl: string,
-  options: DeploySuccessNotificationOptions
-): Promise<DingtalkResult>;
+export interface LogSummary {
+  startTime: string;
+  endTime: string;
+  duration: number;
+  status: string;
+  totalSteps: number;
+  successSteps: number;
+  failedSteps: number;
+}
 
-/**
- * 发送部署失败通知
- */
-export function sendDeployFailureNotification(
-  webhookUrl: string,
-  options: DeployFailureNotificationOptions
-): Promise<DingtalkResult>;
+export function cleanLocalBackups(backupDir: string, retentionDays?: number): void;
 
-/**
- * 发送回滚通知
- */
-export function sendRollbackNotification(
-  webhookUrl: string,
-  options: RollbackNotificationOptions
-): Promise<DingtalkResult>;
+// ====== 更新模块 ======
+export function getCurrentVersion(): string;
+export function getLatestVersion(): Promise<string>;
+export function checkForUpdate(): Promise<UpdateInfo>;
+export function performUpdate(global?: boolean): Promise<boolean>;
+export function showUpdateInfo(): Promise<UpdateInfo | null>;
+
+export interface UpdateInfo {
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+}
+
+// ====== 配置校验 ======
+export function validateConfig(config: any): { valid: boolean; errors: Array<{ field: string; message: string }> };
+
+// ====== 预检模块 ======
+export function runPreflightChecks(options: PreflightOptions): Promise<PreflightResult>;
+
+export interface PreflightOptions {
+  environment: string;
+  envConfig: ServerConfig;
+  config?: any;
+  quick?: boolean;
+}
+
+export interface PreflightResult {
+  results: CheckResult[];
+  canDeploy: boolean;
+  failCount: number;
+  warnCount: number;
+}
+
+export interface CheckResult {
+  name: string;
+  status: 'pass' | 'warn' | 'fail';
+  message: string;
+  detail?: string;
+}
+
+// ====== 初始化模块 ======
+export function runInit(options?: { cwd?: string }): Promise<string | null>;

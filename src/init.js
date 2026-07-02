@@ -6,6 +6,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
@@ -155,9 +156,8 @@ export default {
 
   /**
    * 发布模式
-   * 'main'    — 主分支发布（当前→test→main）
-   * 'current' — 当前分支发布
-   * 'simple'  — 简单模式（直接当前分支构建部署）
+   * 'simple'  — 简单模式（直接当前分支构建部署，推荐）
+   * 'current' — 当前分支发布模式
    */
   deployMode: '${deployMode}',
 
@@ -253,7 +253,7 @@ export default {
   /**
    * 本地备份目录
    */
-  localBackupDir: '${localBackupDir || 'D:\\备份'}'`;
+  localBackupDir: '${localBackupDir || path.join(os.homedir(), 'fe-build-backups')}'`;
   } else {
     content += `
 
@@ -319,10 +319,9 @@ export async function runInit(options = {}) {
 
   console.log('\n发布模式:');
   console.log('  1. simple  — 简单模式，直接当前分支构建部署（推荐）');
-  console.log('  2. current — 当前分支发布，不切换分支');
-  console.log('  3. main    — 主分支发布流程（当前→test→main）');
+  console.log('  2. current — 当前分支发布模式');
   const modeChoice = await prompter.ask('请选择发布模式 (1): ') || '1';
-  const modeMap = { '1': 'simple', '2': 'current', '3': 'main' };
+  const modeMap = { '1': 'simple', '2': 'current' };
   answers.deployMode = modeMap[modeChoice] || 'simple';
   console.log();
 
@@ -441,10 +440,11 @@ export async function runInit(options = {}) {
 
   // ====== 7. 备份下载 ======
   console.log('\n━━━ 备份下载配置（可选）━━━');
+  const defaultBackupDir = path.join(os.homedir(), 'fe-build-backups');
   const backupDownloadInput = await prompter.ask('是否启用从服务器下载备份到本地? (y/n): ');
   answers.enableBackupDownload = backupDownloadInput.toLowerCase() === 'y';
   if (answers.enableBackupDownload) {
-    answers.localBackupDir = await prompter.ask('  本地备份存储目录 (D:\\备份): ') || 'D:\\备份';
+    answers.localBackupDir = await prompter.ask(`  本地备份存储目录 (${defaultBackupDir}): `) || defaultBackupDir;
   }
 
   prompter.close();

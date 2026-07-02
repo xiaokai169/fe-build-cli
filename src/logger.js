@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { formatFileSize } from './utils.js';
 
 /**
  * 日志记录模块
@@ -13,7 +14,7 @@ import process from 'node:process';
 export class DeployLogger {
   constructor(options = {}) {
     this.logDir = options.logDir || 'logs';
-    this.backupDir = options.backupDir || 'D:\\备份';
+    this.backupDir = options.backupDir || '';
     this.logs = [];
     this.startTime = null;
     this.endTime = null;
@@ -38,10 +39,10 @@ export class DeployLogger {
     this.endTime = new Date();
     const duration = Math.round((this.endTime - this.startTime) / 1000);
     this.log('INFO', '部署结束', `结束时间: ${this.formatTime(this.endTime)}, 总耗时: ${duration}秒, 状态: ${status}`);
-    
+
     // 保存日志文件
     this.saveLog();
-    
+
     // 如果有错误，单独保存错误日志
     if (this.hasError) {
       this.saveErrorLog();
@@ -112,45 +113,6 @@ export class DeployLogger {
   }
 
   /**
-   * 记录分支操作
-   */
-  logBranch(action, fromBranch, toBranch, success, message = '') {
-    this.log(
-      success ? 'SUCCESS' : 'ERROR',
-      '分支操作',
-      `${action}: ${fromBranch} → ${toBranch}, ${message || (success ? '成功' : '失败')}`,
-      { action, fromBranch, toBranch }
-    );
-  }
-
-  /**
-   * 记录合并操作
-   */
-  logMerge(sourceBranch, targetBranch, success, hasConflict = false) {
-    const message = hasConflict 
-      ? `合并冲突: ${sourceBranch} → ${targetBranch}` 
-      : `合并: ${sourceBranch} → ${targetBranch}, ${success ? '成功' : '失败'}`;
-    this.log(
-      success ? 'SUCCESS' : 'ERROR',
-      '代码合并',
-      message,
-      { sourceBranch, targetBranch, hasConflict }
-    );
-  }
-
-  /**
-   * 记录 stash 操作
-   */
-  logStash(action, success, message = '') {
-    this.log(
-      success ? 'SUCCESS' : 'ERROR',
-      'Stash操作',
-      `${action}: ${message || (success ? '成功' : '失败')}`,
-      { action }
-    );
-  }
-
-  /**
    * 记录构建操作
    */
   logBuild(buildMode, buildVersion, success, duration = 0) {
@@ -169,7 +131,7 @@ export class DeployLogger {
     this.log(
       success ? 'SUCCESS' : 'ERROR',
       '文件压缩',
-      `压缩包大小: ${this.formatFileSize(fileSize)}, ${success ? '成功' : '失败'}`,
+      `压缩包大小: ${formatFileSize(fileSize)}, ${success ? '成功' : '失败'}`,
       { fileSize }
     );
   }
@@ -194,7 +156,7 @@ export class DeployLogger {
     this.log(
       success ? 'SUCCESS' : 'ERROR',
       '文件上传',
-      `本地: ${localFile}, 远程: ${remoteFile}, 大小: ${this.formatFileSize(fileSize)}, 耗时: ${duration}秒, 速度: ${this.formatFileSize(speed)}/s`,
+      `本地: ${localFile}, 远程: ${remoteFile}, 大小: ${formatFileSize(fileSize)}, 耗时: ${duration}秒, 速度: ${formatFileSize(speed)}/s`,
       { localFile, remoteFile, fileSize, duration, speed }
     );
   }
@@ -229,20 +191,11 @@ export class DeployLogger {
    */
   logDingTalk(success, message = '') {
     this.log(
-      success ? 'SUCCESS' : 'WARN',
+      success ? 'SUCCESS' : 'ERROR',
       '钉钉通知',
       `${success ? '发送成功' : '发送失败'}: ${message}`,
       { success }
     );
-  }
-
-  /**
-   * 格式化文件大小
-   */
-  formatFileSize(bytes) {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
   }
 
   /**
@@ -334,7 +287,7 @@ export class DeployLogger {
 }
 
 /**
- * 清理本地备份（保留7天）
+ * 清理本地备份（保留 N 天）
  * @param {string} backupDir - 本地备份目录
  * @param {number} retentionDays - 保留天数
  */

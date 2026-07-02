@@ -4,10 +4,22 @@
  * 导出所有模块供外部使用
  */
 
+// 公共工具
+export {
+  formatBytes,
+  formatFileSize,
+  shellEscape,
+  parseBackupFilename,
+  formatTime,
+  expandTilde,
+  isWindows,
+  devNull
+} from './utils.js';
+
 // SSH 客户端
 export { SSHClient } from './ssh-client.js';
 
-// Git 分支管理
+// Git 分支管理（仅信息查询，不含合并操作）
 export {
   getCurrentBranch,
   getGitSha,
@@ -15,18 +27,8 @@ export {
   getGitCommitMessages,
   isWorkingTreeClean,
   checkUncommittedChanges,
-  checkoutBranch,
-  pullBranch,
-  mergeBranch,
-  pushBranch,
-  stashChanges,
-  stashPop,
-  autoCommit,
-  executeMainBranchFlow,
   executeCurrentBranchFlow,
-  executeTestBranchFlow,
-  executeSimpleFlow,
-  restoreBranch
+  executeSimpleFlow
 } from './git-branch.js';
 
 // 部署核心逻辑

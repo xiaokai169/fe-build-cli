@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import { Client } from 'ssh2';
+import { formatBytes } from './utils.js';
 
 /**
- * SSH 客户端类，用于连接服务器并执行命令、上传文件
+ * SSH 客户端类，用于连接服务器并执行命令、上传/下载文件
  */
 export class SSHClient {
   constructor(config) {
@@ -17,13 +18,27 @@ export class SSHClient {
    */
   async connect() {
     return new Promise((resolve, reject) => {
-      this.client.connect({
-        host: this.config.sshHost,
-        port: this.config.sshPort || 22,
-        username: this.config.sshUser,
-        privateKey: fs.readFileSync(this.config.sshKeyPath),
-        readyTimeout: 15000
-      });
+      // 检查私钥文件是否存在且权限正确
+      const keyPath = (this.config.sshKeyPath || '')
+        .replace(/^~/, process.env.HOME || process.env.USERPROFILE || '/root');
+      if (!fs.existsSync(keyPath)) {
+        reject(new Error(`SSH 私钥文件不存在: ${keyPath}`));
+        return;
+      }
+
+      try {
+        const keyContent = fs.readFileSync(keyPath);
+        this.client.connect({
+          host: this.config.sshHost,
+          port: this.config.sshPort || 22,
+          username: this.config.sshUser,
+          privateKey: keyContent,
+          readyTimeout: 15000
+        });
+      } catch (err) {
+        reject(new Error(`读取 SSH 私钥失败: ${err.message}`));
+        return;
+      }
 
       this.client.on('ready', () => {
         console.log('✅ SSH 连接成功');
@@ -87,15 +102,8 @@ export class SSHClient {
     const totalBytes = stats.size;
     const startTime = Date.now();
 
-    // 格式化字节数为可读格式
-    function formatBytes(bytes) {
-      if (bytes < 1024) return bytes + ' B';
-      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-      return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
-    }
-
     // 渲染进度条
-    function renderBar(transferred, total) {
+    const renderBar = (transferred, total) => {
       const percent = Math.round((transferred / total) * 100);
       const barWidth = 30;
       const filled = Math.round((percent / 100) * barWidth);
@@ -105,7 +113,7 @@ export class SSHClient {
       process.stdout.write(
         `\r上传进度: [${bar}] ${percent}%  ${formatBytes(transferred)}/${formatBytes(total)}  ${formatBytes(speed)}/s`
       );
-    }
+    };
 
     return new Promise((resolve, reject) => {
       this.client.sftp((err, sftp) => {
@@ -146,15 +154,8 @@ export class SSHClient {
   async downloadFile(remotePath, localPath) {
     const startTime = Date.now();
 
-    // 格式化字节数为可读格式
-    function formatBytes(bytes) {
-      if (bytes < 1024) return bytes + ' B';
-      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-      return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
-    }
-
     // 渲染进度条
-    function renderBar(transferred, total) {
+    const renderBar = (transferred, total) => {
       const percent = Math.round((transferred / total) * 100);
       const barWidth = 30;
       const filled = Math.round((percent / 100) * barWidth);
@@ -164,7 +165,7 @@ export class SSHClient {
       process.stdout.write(
         `\r下载进度: [${bar}] ${percent}%  ${formatBytes(transferred)}/${formatBytes(total)}  ${formatBytes(speed)}/s`
       );
-    }
+    };
 
     return new Promise((resolve, reject) => {
       this.client.sftp((err, sftp) => {
@@ -207,14 +208,39 @@ export class SSHClient {
   }
 
   /**
-   * 断开 SSH 连接
+   * 断开 SSH 连接（带超时保护）
+   * 正常调用 end() 优雅关闭，5 秒超时后强制 destroy()
    * @returns {Promise<void>}
    */
   async disconnect() {
     return new Promise(resolve => {
-      this.client.end();
-      console.log('✅ SSH 连接已关闭');
-      resolve();
+      let resolved = false;
+      const done = () => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timer);
+          console.log('✅ SSH 连接已关闭');
+          resolve();
+        }
+      };
+
+      // 5 秒超时保护：强制销毁连接
+      const timer = setTimeout(() => {
+        if (!resolved) {
+          console.warn('⚠️ SSH 正常关闭超时，强制断开连接');
+          try { this.client.destroy(); } catch { /* 忽略 */ }
+          done();
+        }
+      }, 5000);
+
+      try {
+        this.client.on('close', done);
+        this.client.end();
+      } catch (err) {
+        // end() 抛异常时直接 destroy
+        try { this.client.destroy(); } catch { /* 忽略 */ }
+        done();
+      }
     });
   }
 }

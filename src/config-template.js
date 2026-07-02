@@ -1,3 +1,5 @@
+import os from 'node:os';
+import path from 'node:path';
 import process from 'node:process';
 import fs from 'node:fs';
 
@@ -112,10 +114,10 @@ export function validateConfig(config) {
     });
   }
 
-  if (config.deployMode && !['main', 'current', 'simple', 'test'].includes(config.deployMode)) {
+  if (config.deployMode && !['simple', 'current'].includes(config.deployMode)) {
     errors.push({
       field: 'deployMode',
-      message: `无效的发布模式: ${config.deployMode}，支持: main, current, simple, test`
+      message: `无效的发布模式: ${config.deployMode}，支持: simple, current`
     });
   }
 
@@ -139,12 +141,10 @@ export default {
 
   /**
    * 发布模式
-   * - 'main': 主分支发布模式（默认）
-   *   流程：当前分支 -> 测试分支 -> 主分支，然后从主分支发布
+   * - 'simple': 简单模式（推荐），直接从当前分支构建部署
    * - 'current': 当前分支发布模式
-   *   直接从当前分支发布，不切换分支
    */
-  deployMode: 'main',
+  deployMode: 'simple',
 
   /**
    * 服务器配置
@@ -216,9 +216,9 @@ export default {
 
   /**
    * 本地备份目录（可选）
-   * 线上备份下载到本地的存储目录，默认 D:\备份
+   * 线上备份下载到本地的存储目录
    * 保留 7 天内的备份，自动清理旧备份
    * 仅当 enableBackupDownload 为 true 时生效
    */
-  localBackupDir: 'D:\\备份'
+  localBackupDir: path.join(os.homedir(), 'fe-build-backups')
 };
