@@ -542,9 +542,10 @@ export async function downloadBackup(options) {
  * @param {boolean} options.skipLocalCleanup - 是否跳过本地清理
  * @param {DeployLogger} options.logger - 日志记录器
  * @param {string} options.localBackupDir - 本地备份目录
+ * @param {boolean} options.enableBackupDownload - 是否启用备份下载
  */
 export async function deployToServer(options) {
-  const { environment, envConfig, buildVersion, skipBuild = false, skipLocalCleanup = false, logger, localBackupDir } = options;
+  const { environment, envConfig, buildVersion, skipBuild = false, skipLocalCleanup = false, logger, localBackupDir, enableBackupDownload = true } = options;
 
   if (!skipBuild) {
     buildProject(envConfig, buildVersion, logger);
@@ -597,8 +598,8 @@ export async function deployToServer(options) {
       }
     }
 
-    // 下载线上备份到本地
-    if (localBackupDir) {
+    // 下载线上备份到本地（仅在启用时执行）
+    if (enableBackupDownload && localBackupDir) {
       await downloadBackup({ ssh, envConfig, buildVersion, localBackupDir, logger });
     }
 

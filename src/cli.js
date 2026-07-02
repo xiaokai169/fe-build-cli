@@ -338,6 +338,7 @@ async function deployCommand(config) {
   // 创建日志记录器（在分支操作之前）
   const logDir = config.logDir || 'logs';
   const localBackupDir = config.localBackupDir || 'D:\\备份';
+  const enableBackupDownload = config.enableBackupDownload !== false; // 默认 true
   const logger = new DeployLogger({ logDir, localBackupDir });
   logger.start();
 
@@ -519,7 +520,8 @@ async function deployCommand(config) {
         skipBuild: skipBuild || !isFirst,
         skipLocalCleanup: i < selectedServers.length - 1,
         logger,
-        localBackupDir
+        localBackupDir,
+        enableBackupDownload
       });
 
       // 部署成功，结束日志记录

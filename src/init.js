@@ -133,6 +133,7 @@ function generateConfigContent(answers, projectInfo) {
     buildCommand, buildTestCommand,
     productionBuildMode,
     enableDingtalk, dingtalkWebhook, dingtalkKeyword,
+    enableBackupDownload, localBackupDir,
     protectedDirs
   } = answers;
 
@@ -238,12 +239,31 @@ export default {
   /**
    * 日志目录
    */
-  logDir: 'logs',
+  logDir: 'logs',`;
+
+  // 备份下载配置
+  if (enableBackupDownload) {
+    content += `
+
+  /**
+   * 是否启用备份下载
+   */
+  enableBackupDownload: true,
 
   /**
    * 本地备份目录
    */
-  localBackupDir: 'D:\\备份'
+  localBackupDir: '${localBackupDir || 'D:\\备份'}'`;
+  } else {
+    content += `
+
+  /**
+   * 是否启用备份下载
+   */
+  enableBackupDownload: false`;
+  }
+
+  content += `
 };
 `;
 
@@ -417,6 +437,14 @@ export async function runInit(options = {}) {
   if (answers.enableDingtalk) {
     answers.dingtalkWebhook = await prompter.ask('  钉钉机器人 Webhook URL: ');
     answers.dingtalkKeyword = await prompter.ask('  安全关键词 (部署): ') || '部署';
+  }
+
+  // ====== 7. 备份下载 ======
+  console.log('\n━━━ 备份下载配置（可选）━━━');
+  const backupDownloadInput = await prompter.ask('是否启用从服务器下载备份到本地? (y/n): ');
+  answers.enableBackupDownload = backupDownloadInput.toLowerCase() === 'y';
+  if (answers.enableBackupDownload) {
+    answers.localBackupDir = await prompter.ask('  本地备份存储目录 (D:\\备份): ') || 'D:\\备份';
   }
 
   prompter.close();

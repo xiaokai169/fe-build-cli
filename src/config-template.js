@@ -209,9 +209,16 @@ export default {
   logDir: 'logs',
 
   /**
+   * 是否启用备份下载（可选）
+   * 部署完成后是否自动从服务器下载备份到本地，默认 true
+   */
+  enableBackupDownload: true,
+
+  /**
    * 本地备份目录（可选）
    * 线上备份下载到本地的存储目录，默认 D:\备份
    * 保留 7 天内的备份，自动清理旧备份
+   * 仅当 enableBackupDownload 为 true 时生效
    */
   localBackupDir: 'D:\\备份'
 };

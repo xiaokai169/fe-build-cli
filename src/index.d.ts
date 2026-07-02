@@ -66,6 +66,12 @@ export interface FeBuildConfig {
   servers: Record<string, ServerConfig>;
   /** 备份保留数量 */
   backupRetentionCount?: number;
+  /** 日志目录 */
+  logDir?: string;
+  /** 是否启用备份下载，默认 true */
+  enableBackupDownload?: boolean;
+  /** 本地备份目录 */
+  localBackupDir?: string;
 }
 
 /**
@@ -82,6 +88,10 @@ export interface DeployOptions {
   skipBuild?: boolean;
   /** 是否跳过本地清理 */
   skipLocalCleanup?: boolean;
+  /** 本地备份目录 */
+  localBackupDir?: string;
+  /** 是否启用备份下载 */
+  enableBackupDownload?: boolean;
 }
 
 /**
