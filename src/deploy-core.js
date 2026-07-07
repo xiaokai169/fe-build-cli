@@ -4,7 +4,7 @@ import path from 'node:path';
 import process from 'node:process';
 import SSHClient from './ssh-client.js';
 import { DeployLogger, cleanLocalBackups } from './logger.js';
-import { formatBytes, shellEscape, parseBackupFilename, expandTilde } from './utils.js';
+import { formatBytes, shellEscape, parseBackupFilename, expandTilde, isWindows } from './utils.js';
 
 /**
  * 获取服务器备份列表
@@ -167,7 +167,18 @@ export function compressBuild(localZipFile, logger) {
   console.log('\n[步骤 3/7] 压缩本地构建产物...');
 
   try {
-    execSync(`tar -I 'zstd -T0' -cf ${shellEscape(localZipFile)} -C dist .`, { stdio: 'inherit' });
+    // Windows 自带的 tar 不支持 -I (--use-compress-program)，改用管道方式
+    if (isWindows()) {
+      execSync(
+        `tar -cf - -C dist . | zstd -T0 -o ${shellEscape(localZipFile)}`,
+        { stdio: 'inherit' }
+      );
+    } else {
+      execSync(
+        `tar -I 'zstd -T0' -cf ${shellEscape(localZipFile)} -C dist .`,
+        { stdio: 'inherit' }
+      );
+    }
     const stats = fs.statSync(localZipFile);
     logger.logCompress(stats.size, true);
     console.log('✅ 压缩完成');
@@ -267,10 +278,14 @@ async function swapDeployDir({ ssh, envConfig, tmpDeployDir, protectedDirs }) {
  * @param {object} options - 选项
  */
 export async function pipeUploadDeploy(options) {
-  const { ssh, envConfig, buildVersion, logger } = options;
+  const { ssh, envConfig, buildVersion, logger, skipBackup = false } = options;
 
   // ====== A. 备份当前部署 ======
-  await backupExistingDeployment({ ssh, envConfig, buildVersion, logger });
+  if (!skipBackup) {
+    await backupExistingDeployment({ ssh, envConfig, buildVersion, logger });
+  } else {
+    console.log('  (跳过备份，前面策略已创建)');
+  }
 
   // ====== B. 准备临时目录（避免部署空窗期导致 403）======
   console.log('\n[步骤 3/7] 准备临时部署目录...');
@@ -390,10 +405,14 @@ export async function pipeUploadDeploy(options) {
  * @param {DeployLogger} options.logger
  */
 export async function rsyncUploadDeploy(options) {
-  const { ssh, envConfig, buildVersion, logger } = options;
+  const { ssh, envConfig, buildVersion, logger, skipBackup = false } = options;
 
   // ====== A. 备份当前部署 ======
-  await backupExistingDeployment({ ssh, envConfig, buildVersion, logger });
+  if (!skipBackup) {
+    await backupExistingDeployment({ ssh, envConfig, buildVersion, logger });
+  } else {
+    console.log('  (跳过备份，前面策略已创建)');
+  }
 
   // ====== B. 准备临时目录 ======
   console.log('\n[步骤 3/7] 准备临时部署目录...');
@@ -413,18 +432,10 @@ export async function rsyncUploadDeploy(options) {
 
   const keyPath = expandTilde(envConfig.sshKeyPath).replace(/\\/g, '/');
   const sshPort = envConfig.sshPort || 22;
-
-  // RSYNC_RSH 环境变量方式（避免 -e 参数的引用嵌套问题）
-  const rshCmd = [
-    'ssh',
-    '-i', keyPath,
-    '-p', String(sshPort),
-    '-o', 'StrictHostKeyChecking=no',
-    '-o', 'ConnectTimeout=15',
-    '-o', 'BatchMode=yes'
-  ].join(' ');
-
   const remoteTarget = `${envConfig.sshUser}@${envConfig.sshHost}:${tmpDeployDir}`;
+
+  // 构建 SSH 命令（作为 rsync -e 的参数）
+  const sshCmd = `ssh -i ${keyPath} -p ${sshPort} -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes`;
 
   const rsyncArgs = [
     '-az',                  // 归档 + 压缩
@@ -434,6 +445,7 @@ export async function rsyncUploadDeploy(options) {
     '--no-group',
     '--info=progress2',     // 总进度（非每文件）
     '--human-readable',
+    '-e', sshCmd,           // SSH 命令（数组方式避免引用嵌套）
     './dist/',              // 注意尾部 / = 复制内容而非目录本身
     `${remoteTarget}/`
   ];
@@ -448,8 +460,7 @@ export async function rsyncUploadDeploy(options) {
 
   try {
     rsync = spawn('rsync', rsyncArgs, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, RSYNC_RSH: rshCmd }
+      stdio: ['ignore', 'pipe', 'pipe']
     });
 
     let lastProgress = Date.now();
@@ -734,11 +745,11 @@ export async function deployToServer(options) {
             logger.log('WARN', '传输降级', '服务器未安装 rsync');
             continue;
           }
-          await rsyncUploadDeploy({ ssh, envConfig, buildVersion, logger });
+          await rsyncUploadDeploy({ ssh, envConfig, buildVersion, logger, skipBackup: backupDone });
           finalMode = 'rsync';
           break;
         } catch (rsyncError) {
-          backupDone = true; // rsyncUploadDeploy 内部已备份
+          backupDone = true;
           console.log(`\n⚠️  rsync 失败 (${rsyncError.message})，降级...`);
           logger.log('WARN', '传输降级', `rsync 失败: ${rsyncError.message}`);
           try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-rsync-tmp')}`); } catch { /* 忽略 */ }
@@ -748,11 +759,11 @@ export async function deployToServer(options) {
 
       if (strategy === 'pipe') {
         try {
-          await pipeUploadDeploy({ ssh, envConfig, buildVersion, logger });
+          await pipeUploadDeploy({ ssh, envConfig, buildVersion, logger, skipBackup: backupDone });
           finalMode = 'pipe';
           break;
         } catch (pipeError) {
-          backupDone = true; // pipeUploadDeploy 内部已备份
+          backupDone = true;
           console.log(`\n⚠️  管道流失败 (${pipeError.message})，降级...`);
           logger.log('WARN', '传输降级', `管道流失败: ${pipeError.message}`);
           try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-tmp')}`); } catch { /* 忽略 */ }
@@ -770,7 +781,7 @@ export async function deployToServer(options) {
         if (!backupDone) {
           await backupExistingDeployment({ ssh, envConfig, buildVersion, logger, suffix: '-sftp' });
         } else {
-          console.log('  (跳过重复备份，前面策略已创建)');
+          console.log('  (跳过备份，前面策略已创建)');
         }
         await uploadBuild({ ssh, localZipFile, remoteZipFile, logger });
 
