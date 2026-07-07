@@ -716,6 +716,7 @@ export async function deployToServer(options) {
   }
 
   let finalMode = null;
+  let backupDone = false; // 跟踪备份是否已完成，降级时避免重复备份
 
   try {
     await ssh.connect();
@@ -737,6 +738,7 @@ export async function deployToServer(options) {
           finalMode = 'rsync';
           break;
         } catch (rsyncError) {
+          backupDone = true; // rsyncUploadDeploy 内部已备份
           console.log(`\n⚠️  rsync 失败 (${rsyncError.message})，降级...`);
           logger.log('WARN', '传输降级', `rsync 失败: ${rsyncError.message}`);
           try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-rsync-tmp')}`); } catch { /* 忽略 */ }
@@ -750,6 +752,7 @@ export async function deployToServer(options) {
           finalMode = 'pipe';
           break;
         } catch (pipeError) {
+          backupDone = true; // pipeUploadDeploy 内部已备份
           console.log(`\n⚠️  管道流失败 (${pipeError.message})，降级...`);
           logger.log('WARN', '传输降级', `管道流失败: ${pipeError.message}`);
           try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-tmp')}`); } catch { /* 忽略 */ }
@@ -763,7 +766,12 @@ export async function deployToServer(options) {
         const remoteZipFile = `${envConfig.backupDir}/${localZipFile}`;
 
         compressBuild(localZipFile, logger);
-        await backupExistingDeployment({ ssh, envConfig, buildVersion, logger, suffix: '-sftp' });
+        // 只有前面的策略未备份时才备份，避免重复
+        if (!backupDone) {
+          await backupExistingDeployment({ ssh, envConfig, buildVersion, logger, suffix: '-sftp' });
+        } else {
+          console.log('  (跳过重复备份，前面策略已创建)');
+        }
         await uploadBuild({ ssh, localZipFile, remoteZipFile, logger });
 
         try {
