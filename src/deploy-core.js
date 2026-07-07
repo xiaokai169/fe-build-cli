@@ -712,7 +712,7 @@ export async function deployToServer(options) {
 
   if (configuredMode === 'pipe') {
     strategies = ['pipe', 'sftp'];
-    console.log('\n📌 传输模式: tar + zstd 管道流');
+    console.log('\n📌 传输模式: tar + zstd 管道流（显式指定）');
   } else if (configuredMode === 'rsync') {
     strategies = ['rsync', 'sftp'];
     console.log('\n📌 传输模式: rsync 增量同步');
@@ -720,13 +720,13 @@ export async function deployToServer(options) {
     strategies = ['sftp'];
     console.log('\n📌 传输模式: SFTP 上传');
   } else {
-    // 自动: 检测 rsync 可用性
+    // 自动: rsync 可用则优先，否则直接 SFTP（pipe 太脆弱，默认不用）
     if (checkRsyncAvailable()) {
-      strategies = ['rsync', 'pipe', 'sftp'];
+      strategies = ['rsync', 'sftp'];
       console.log('\n📌 本地 rsync 可用，优先使用 rsync 增量同步');
     } else {
-      strategies = ['pipe', 'sftp'];
-      console.log('\n📌 使用 tar + zstd 管道流直传模式');
+      strategies = ['sftp'];
+      console.log('\n📌 使用 SFTP 上传模式（稳定可靠）');
     }
   }
 

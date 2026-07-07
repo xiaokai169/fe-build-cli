@@ -416,12 +416,12 @@ export async function runInit(options = {}) {
 
   // 传输模式选择
   console.log('\n传输模式:');
-  console.log('  1. pipe  — tar + zstd 管道流（默认，速度最快）');
+  console.log('  1. sftp  — SFTP 上传（默认推荐，稳定可靠）');
   console.log('  2. rsync — rsync 增量同步（仅传变更文件，需本地和远程都安装 rsync）');
-  console.log('  3. sftp  — SFTP 上传（最兼容，最慢）');
+  console.log('  3. pipe  — tar + zstd 管道流（速度最快但依赖 SSH 通道稳定性）');
   const transferChoice = await prompter.ask('请选择传输模式 (1): ') || '1';
-  const transferModeMap = { '1': 'pipe', '2': 'rsync', '3': 'sftp' };
-  answers.transferMode = transferModeMap[transferChoice] || 'pipe';
+  const transferModeMap = { '1': 'sftp', '2': 'rsync', '3': 'pipe' };
+  answers.transferMode = transferModeMap[transferChoice] || 'sftp';
 
   console.log();
 
