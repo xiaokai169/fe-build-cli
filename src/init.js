@@ -468,7 +468,7 @@ export async function runInit(options = {}) {
   console.log(`\n✅ 配置文件已保存: ${configPath}`);
 
   // 生成后提示
-  console.log('📌 部署传输: tar 管道流直传（压缩→传输→解压流水线）');
+  console.log('📌 部署传输: tar + zstd 管道流直传（压缩→传输→解压流水线）');
 
   console.log('\n下一步:');
   console.log(`  1. 检查配置:    fe-build check production`);

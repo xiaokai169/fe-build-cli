@@ -73,7 +73,7 @@ export async function rollbackCommand(config) {
 
   try {
     if (specifiedVersion) {
-      backupFile = `${envConfig.backupDir}/${envConfig.backupPrefix}-${specifiedVersion}.tar.gz`;
+      backupFile = `${envConfig.backupDir}/${envConfig.backupPrefix}-${specifiedVersion}.tar.zst`;
       console.log(`\n使用指定版本: ${specifiedVersion}`);
       logger.log('INFO', '回滚版本', `指定版本: ${specifiedVersion}`);
     } else {
