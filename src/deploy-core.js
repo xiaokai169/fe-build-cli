@@ -288,78 +288,49 @@ export async function pipeUploadDeploy(options) {
 
   // ====== C. tar 管道流直传 → 临时目录（带进度） ======
   console.log(`\n[步骤 4/7] 流式传输 dist/ → ${envConfig.sshHost}...`);
-  console.log('  (tar 管道: 压缩→传输→解压 流水线并行)');
-
-  const sshPort = envConfig.sshPort || 22;
-  const sshKeyPath = (envConfig.sshKeyPath || '')
-    .replace(/^~/, process.env.HOME || process.env.USERPROFILE || '/root')
-    .replace(/\\/g, '/');
-  const sshTarget = `${envConfig.sshUser}@${envConfig.sshHost}`;
+  console.log('  (tar 管道: 压缩→传输→解压 流水线并行，复用已有 SSH 连接)');
 
   const startTime = Date.now();
 
   try {
-    // 直接通过管道流传输，不预计算大小（避免重复压缩）
-    await new Promise((resolve, reject) => {
-      const tar = spawn('tar', ['-czf', '-', '-C', 'dist', '.']);
-      const sshArgs = [
-        '-T',  // 禁用伪终端，避免服务器登录 shell 的 stderr 混入
-        '-i', sshKeyPath,
-        '-p', String(sshPort),
-        '-o', 'StrictHostKeyChecking=no',
-        '-o', 'ConnectTimeout=15',
-        '-o', 'LogLevel=QUIET',
-        '-o', 'BatchMode=yes',
-        '-o', 'PasswordAuthentication=no',
-        sshTarget,
-        `tar -xzf - -C ${tmpDeployDir}`
-      ];
-      const sshProc = spawn('ssh', sshArgs);
+    // 使用已有 SSH 连接传输，不再 spawn 第二条 ssh 连接
+    const tar = spawn('tar', ['-czf', '-', '-C', 'dist', '.']);
 
-      let bytesTransferred = 0;
-      let lastUpdate = Date.now();
+    let bytesTransferred = 0;
+    let lastUpdate = Date.now();
 
-      tar.stdout.pipe(sshProc.stdin);
+    const onProgress = () => {
+      const now = Date.now();
+      if (now - lastUpdate > 200) {
+        lastUpdate = now;
+        const elapsed = (now - startTime) / 1000;
+        const speed = elapsed > 0 ? bytesTransferred / elapsed : 0;
+        const barW = 20;
+        const tick = Math.floor((elapsed * 4) % barW);
+        const bar = '░'.repeat(tick) + '█' + '░'.repeat(Math.max(0, barW - tick - 1));
+        process.stdout.write(`\r  [${bar}] ${formatBytes(bytesTransferred)}  ${formatBytes(speed)}/s  ${Math.round(elapsed)}s`);
+      }
+    };
 
-      tar.stdout.on('data', (chunk) => {
-        bytesTransferred += chunk.length;
-        const now = Date.now();
-        // 每 200ms 更新一次进度
-        if (now - lastUpdate > 200) {
-          lastUpdate = now;
-          const elapsed = (now - startTime) / 1000;
-          const speed = elapsed > 0 ? bytesTransferred / elapsed : 0;
-          const barW = 20;
-          // 用旋转动画表示传输中（不预计算总大小）
-          const tick = Math.floor((elapsed * 4) % barW);
-          const bar = '░'.repeat(tick) + '█' + '░'.repeat(Math.max(0, barW - tick - 1));
-          process.stdout.write(`\r  [${bar}] ${formatBytes(bytesTransferred)}  ${formatBytes(speed)}/s  ${Math.round(elapsed)}s`);
-        }
-      });
+    tar.stderr.on('data', () => { /* 静默 tar 权限警告 */ });
 
-      tar.stderr.on('data', () => {
-        // tar 的 stderr 有时是正常的（比如权限警告），不输出到控制台
-      });
-
-      // SSH stderr 静默（服务器登录脚本的 locale 警告等）
-      let sshStderr = '';
-      sshProc.stderr.on('data', (data) => {
-        sshStderr += data.toString();
-      });
-
-      sshProc.on('close', (code) => {
-        if (code === 0) {
-          const elapsed = (Date.now() - startTime) / 1000;
-          process.stdout.write(`\r  传输完成: ${formatBytes(bytesTransferred)}  ${Math.round(elapsed)}s                    \n`);
-          resolve(bytesTransferred);
-        } else {
-          reject(new Error(`SSH 退出码: ${code}${sshStderr ? ', stderr: ' + sshStderr.trim() : ''}`));
-        }
-      });
-
+    // 同时监听 tar 进程错误和 SSH 管道传输结果，谁先出错谁触发 reject
+    const tarError = new Promise((_, reject) => {
       tar.on('error', reject);
-      sshProc.on('error', reject);
     });
+
+    // 使用已有 SSH 连接传输（不再 spawn 第二条连接，避免 MaxSessions 冲突）
+    bytesTransferred = await Promise.race([
+      ssh.pipeExec(
+        `tar -xzf - -C ${tmpDeployDir}`,
+        tar.stdout,
+        (written) => { bytesTransferred = written; onProgress(); }
+      ),
+      tarError
+    ]);
+
+    const elapsed = (Date.now() - startTime) / 1000;
+    process.stdout.write(`\r  传输完成: ${formatBytes(bytesTransferred)}  ${Math.round(elapsed)}s                    \n`);
 
     const duration = Math.round((Date.now() - startTime) / 1000);
     console.log(`✅ 流式传输完成 (${duration}s)`);

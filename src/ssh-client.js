@@ -13,18 +13,59 @@ export class SSHClient {
   }
 
   /**
-   * 建立 SSH 连接
+   * 判断是否为可重试的网络错误
+   * @param {Error} err
+   * @returns {boolean}
+   */
+  _isRetryableError(err) {
+    const retryableCodes = ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAGAIN'];
+    const retryableMessages = ['Connection lost before handshake', 'connect ETIMEDOUT'];
+    return retryableCodes.includes(err.code) ||
+           retryableMessages.some(m => err.message && err.message.includes(m));
+  }
+
+  /**
+   * 建立 SSH 连接（带重试机制）
+   * @param {number} [maxRetries=3] - 最大重试次数
    * @returns {Promise<void>}
    */
-  async connect() {
-    return new Promise((resolve, reject) => {
-      // 检查私钥文件是否存在且权限正确
-      const keyPath = (this.config.sshKeyPath || '')
-        .replace(/^~/, process.env.HOME || process.env.USERPROFILE || '/root');
-      if (!fs.existsSync(keyPath)) {
-        reject(new Error(`SSH 私钥文件不存在: ${keyPath}`));
-        return;
+  async connect(maxRetries = 3) {
+    // 检查私钥文件是否存在且权限正确
+    const keyPath = (this.config.sshKeyPath || '')
+      .replace(/^~/, process.env.HOME || process.env.USERPROFILE || '/root');
+    if (!fs.existsSync(keyPath)) {
+      throw new Error(`SSH 私钥文件不存在: ${keyPath}`);
+    }
+
+    let lastError;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        await this._doConnect(keyPath);
+        return; // 连接成功
+      } catch (err) {
+        lastError = err;
+        if (attempt < maxRetries && this._isRetryableError(err)) {
+          const delay = Math.min(2000 * attempt, 10000); // 递增延迟: 2s, 4s, 6s... 最长10s
+          console.error(`\n⚠️  SSH 连接失败 (${attempt}/${maxRetries}): ${err.message}`);
+          console.error(`   等待 ${delay / 1000}s 后重试...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        } else {
+          throw err; // 不可重试或已达最大次数
+        }
       }
+    }
+    throw lastError;
+  }
+
+  /**
+   * 执行单次 SSH 连接
+   * @param {string} keyPath - 私钥路径
+   * @returns {Promise<void>}
+   */
+  _doConnect(keyPath) {
+    return new Promise((resolve, reject) => {
+      // 每次重试前创建新的 Client 实例（因为 ssh2 的 Client 不能复用）
+      this.client = new Client();
 
       try {
         const keyContent = fs.readFileSync(keyPath);
@@ -116,6 +157,63 @@ export class SSHClient {
           } else {
             reject(new Error(`命令执行失败，退出码: ${code}, 错误信息: ${errorOutput}`));
           }
+        });
+      });
+    });
+  }
+
+  /**
+   * 通过已建立的 SSH 连接执行命令并将本地流数据管道传输到远程命令的 stdin
+   * 用于 tar 管道流直传等场景，复用已有连接，不额外创建 SSH 连接
+   * @param {string} command - 远程命令（需支持从 stdin 读取数据）
+   * @param {stream.Readable} inputStream - 本地输入流（如 tar 的 stdout）
+   * @param {function} [onProgress] - 进度回调 (bytesWritten: number) => void
+   * @returns {Promise<number>} 传输的字节数
+   */
+  async pipeExec(command, inputStream, onProgress) {
+    return new Promise((resolve, reject) => {
+      this.client.exec(command, (err, stream) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        let bytesWritten = 0;
+        let stderr = '';
+
+        stream.stderr.on('data', (data) => {
+          stderr += data.toString();
+        });
+
+        stream.on('close', (code) => {
+          if (code === 0) {
+            resolve(bytesWritten);
+          } else {
+            reject(new Error(
+              `远程命令退出码: ${code}${stderr ? ', stderr: ' + stderr.trim() : ''}`
+            ));
+          }
+        });
+
+        // 追踪传输字节数（在 pipe 之前注册监听，两者不冲突）
+        if (onProgress) {
+          inputStream.on('data', (chunk) => {
+            bytesWritten += chunk.length;
+            onProgress(bytesWritten);
+          });
+        }
+
+        // 将本地 tar 输出管道到远程 tar 的 stdin
+        inputStream.pipe(stream);
+
+        inputStream.on('error', (err) => {
+          // 本地流出错时关闭远程通道
+          try { stream.close(); } catch { /* 忽略 */ }
+          reject(err);
+        });
+
+        stream.on('error', (err) => {
+          reject(err);
         });
       });
     });
