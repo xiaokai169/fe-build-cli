@@ -34,8 +34,8 @@ export class SSHClient {
           username: this.config.sshUser,
           privateKey: keyContent,
           readyTimeout: 30000, // 增加连接超时时间到 30 秒
-          keepaliveInterval: 10000, // 每 10 秒发送保活信号
-          keepaliveCountMax: 3, // 最多发送 3 次保活信号
+          keepaliveInterval: 5000, // 每 5 秒发送保活信号（更频繁）
+          keepaliveCountMax: 5, // 最多发送 5 次保活信号
           algorithms: {
             // 使用更稳定的加密算法
             kex: [
