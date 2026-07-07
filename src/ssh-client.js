@@ -33,7 +33,27 @@ export class SSHClient {
           port: this.config.sshPort || 22,
           username: this.config.sshUser,
           privateKey: keyContent,
-          readyTimeout: 15000
+          readyTimeout: 30000, // 增加连接超时时间到 30 秒
+          keepaliveInterval: 10000, // 每 10 秒发送保活信号
+          keepaliveCountMax: 3, // 最多发送 3 次保活信号
+          algorithms: {
+            // 使用更稳定的加密算法
+            kex: [
+              'curve25519-sha256@libssh.org',
+              'ecdh-sha2-nistp256',
+              'ecdh-sha2-nistp384',
+              'ecdh-sha2-nistp521',
+              'diffie-hellman-group-exchange-sha256',
+              'diffie-hellman-group14-sha256'
+            ],
+            cipher: [
+              'aes128-ctr',
+              'aes192-ctr',
+              'aes256-ctr',
+              'aes128-gcm',
+              'aes256-gcm'
+            ]
+          }
         });
       } catch (err) {
         reject(new Error(`读取 SSH 私钥失败: ${err.message}`));
@@ -48,6 +68,16 @@ export class SSHClient {
       this.client.on('error', err => {
         console.error('❌ SSH 连接失败:', err.message);
         reject(err);
+      });
+
+      // 处理连接关闭事件
+      this.client.on('close', () => {
+        console.log('ℹ️ SSH 连接已关闭');
+      });
+
+      // 处理连接结束事件
+      this.client.on('end', () => {
+        console.log('ℹ️ SSH 连接结束');
       });
     });
   }
