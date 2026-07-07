@@ -172,34 +172,102 @@ export class SSHClient {
    */
   async pipeExec(command, inputStream, onProgress) {
     return new Promise((resolve, reject) => {
+      let settled = false;
+
+      // 超时定时器：如果 120 秒内没有任何数据或完成信号，强制 reject
+      let timeoutTimer = null;
+      const STALL_TIMEOUT = 120000; // 120 秒无数据则判定为卡死
+
+      const resetTimeout = () => {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        timeoutTimer = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            cleanup();
+            reject(new Error(
+              `管道传输超时：${STALL_TIMEOUT / 1000}s 内无数据传输，可能连接已断开`
+            ));
+          }
+        }, STALL_TIMEOUT);
+      };
+
+      // 清理所有监听器，避免内存泄漏
+      const cleanup = () => {
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = null;
+        }
+        this.client.removeListener('close', onClientClose);
+        this.client.removeListener('error', onClientError);
+      };
+
+      // 底层连接断开或出错时直接 reject（exec stream 可能收不到通知）
+      const onClientClose = () => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error('SSH 连接已断开，管道传输中断'));
+        }
+      };
+
+      const onClientError = (err) => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error(`SSH 连接错误: ${err.message}`));
+        }
+      };
+
+      // 在 exec 回调之前注册连接级监听，防止 exec 失败时连接已断开
+      this.client.on('close', onClientClose);
+      this.client.on('error', onClientError);
+
       this.client.exec(command, (err, stream) => {
         if (err) {
-          reject(err);
+          if (!settled) {
+            settled = true;
+            cleanup();
+            reject(err);
+          }
           return;
         }
 
         let bytesWritten = 0;
         let stderr = '';
 
+        // 先注册 error 监听器（在 pipe 之前），避免 pipe 期间的 error 漏掉
+        stream.on('error', (err) => {
+          if (!settled) {
+            settled = true;
+            cleanup();
+            reject(err);
+          }
+        });
+
         stream.stderr.on('data', (data) => {
           stderr += data.toString();
         });
 
         stream.on('close', (code) => {
-          if (code === 0) {
-            resolve(bytesWritten);
-          } else {
-            reject(new Error(
-              `远程命令退出码: ${code}${stderr ? ', stderr: ' + stderr.trim() : ''}`
-            ));
+          if (!settled) {
+            settled = true;
+            cleanup();
+            if (code === 0) {
+              resolve(bytesWritten);
+            } else {
+              reject(new Error(
+                `远程命令退出码: ${code}${stderr ? ', stderr: ' + stderr.trim() : ''}`
+              ));
+            }
           }
         });
 
-        // 追踪传输字节数（在 pipe 之前注册监听，两者不冲突）
+        // 追踪传输字节数（每次收到数据时重置空闲超时）
         if (onProgress) {
           inputStream.on('data', (chunk) => {
             bytesWritten += chunk.length;
             onProgress(bytesWritten);
+            resetTimeout(); // 有数据传输 → 重置超时计时器
           });
         }
 
@@ -207,14 +275,21 @@ export class SSHClient {
         inputStream.pipe(stream);
 
         inputStream.on('error', (err) => {
-          // 本地流出错时关闭远程通道
-          try { stream.close(); } catch { /* 忽略 */ }
-          reject(err);
+          if (!settled) {
+            settled = true;
+            cleanup();
+            try { stream.close(); } catch { /* 忽略 */ }
+            reject(err);
+          }
         });
 
-        stream.on('error', (err) => {
-          reject(err);
-        });
+        // 启动首次超时计时（有 onProgress 时由 data 事件重置）
+        if (!onProgress) {
+          resetTimeout();
+        } else {
+          // 初始启动超时，后续由 data 事件重置
+          resetTimeout();
+        }
       });
     });
   }
