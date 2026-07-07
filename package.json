@@ -1,6 +1,6 @@
 {
   "name": "fe-build-cli",
-  "version": "1.8.21",
+  "version": "1.8.22",
   "description": "前端项目打包部署 CLI 工具，支持多服务器部署、分支管理、回滚、钉钉通知、智能处理本地改动等功能",
   "type": "module",
   "main": "src/index.js",
