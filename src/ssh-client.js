@@ -122,12 +122,13 @@ export class SSHClient {
   }
 
   /**
-   * 上传文件到远程服务器（带进度条）
+   * 上传文件到远程服务器（带进度条和兜底方式）
    * @param {string} localPath - 本地文件路径
    * @param {string} remotePath - 远程文件路径
+   * @param {number} retries - 重试次数，默认 3 次
    * @returns {Promise<void>}
    */
-  async uploadFile(localPath, remotePath) {
+  async uploadFile(localPath, remotePath, retries = 3) {
     const stats = fs.statSync(localPath);
     const totalBytes = stats.size;
     const startTime = Date.now();
@@ -145,34 +146,103 @@ export class SSHClient {
       );
     };
 
-    return new Promise((resolve, reject) => {
-      this.client.sftp((err, sftp) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-
-        sftp.fastPut(
-          localPath,
-          remotePath,
-          {
-            step: (transferred, _chunk, total) => {
-              renderBar(transferred, total);
-            }
-          },
-          err => {
-            if (err) {
-              reject(err);
-            } else {
-              renderBar(totalBytes, totalBytes);
-              process.stdout.write('\n');
-              console.log(`✅ 上传成功: ${localPath} -> ${remotePath}`);
-              resolve();
-            }
+    // 方式1：SFTP fastPut（带进度条）
+    const trySftpUpload = async (attempt) => {
+      return new Promise((resolve, reject) => {
+        this.client.sftp((err, sftp) => {
+          if (err) {
+            reject(err);
+            return;
           }
-        );
+
+          sftp.fastPut(
+            localPath,
+            remotePath,
+            {
+              step: (transferred, _chunk, total) => {
+                renderBar(transferred, total);
+              }
+            },
+            err => {
+              if (err) {
+                reject(err);
+              } else {
+                renderBar(totalBytes, totalBytes);
+                process.stdout.write('\n');
+                console.log(`✅ SFTP 上传成功: ${localPath} -> ${remotePath}`);
+                resolve();
+              }
+            }
+          );
+        });
       });
-    });
+    };
+
+    // 方式2：SSH 命令行兜底上传（不依赖 SFTP）
+    const trySshFallbackUpload = async () => {
+      console.log('⚠️  SFTP 上传失败，尝试 SSH 命令行兜底上传...');
+      return new Promise((resolve, reject) => {
+        this.client.exec(`cat > '${remotePath}'`, (err, stream) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+
+          const fileStream = fs.createReadStream(localPath);
+          let transferred = 0;
+
+          fileStream.on('data', chunk => {
+            stream.stdin.write(chunk);
+            transferred += chunk.length;
+            renderBar(transferred, totalBytes);
+          });
+
+          fileStream.on('end', () => {
+            stream.stdin.end();
+            renderBar(totalBytes, totalBytes);
+            process.stdout.write('\n');
+            console.log(`✅ SSH 命令行上传成功: ${localPath} -> ${remotePath}`);
+            resolve();
+          });
+
+          fileStream.on('error', err => {
+            reject(err);
+          });
+
+          stream.stderr.on('data', data => {
+            console.error('SSH 上传错误:', data.toString());
+          });
+
+          stream.on('close', code => {
+            if (code !== 0) {
+              reject(new Error(`SSH 上传失败，退出码: ${code}`));
+            }
+          });
+        });
+      });
+    };
+
+    // 尝试 SFTP 上传，失败则使用 SSH 命令行兜底
+    for (let i = 0; i < retries; i++) {
+      try {
+        await trySftpUpload(i + 1);
+        return; // 成功则返回
+      } catch (err) {
+        console.log(`\n⚠️  SFTP 上传失败 (尝试 ${i + 1}/${retries}): ${err.message}`);
+        if (i === retries - 1) {
+          console.log('❌ SFTP 上传多次失败，切换到 SSH 命令行兜底方式');
+          // 最后一次失败，使用 SSH 命令行兜底
+          try {
+            await trySshFallbackUpload();
+            return;
+          } catch (fallbackErr) {
+            throw new Error(`所有上传方式失败: SFTP ${err.message}, SSH ${fallbackErr.message}`);
+          }
+        }
+        // 等待 2 秒后重试
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
   }
 
   /**
