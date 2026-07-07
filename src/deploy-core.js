@@ -435,7 +435,8 @@ export async function rsyncUploadDeploy(options) {
   const remoteTarget = `${envConfig.sshUser}@${envConfig.sshHost}:${tmpDeployDir}`;
 
   // 构建 SSH 命令（作为 rsync -e 的参数）
-  const sshCmd = `ssh -i ${keyPath} -p ${sshPort} -o StrictHostKeyChecking=no -o ConnectTimeout=15 -o BatchMode=yes`;
+  // LogLevel=ERROR 抑制远程 MOTD/banner，避免污染 rsync 协议流导致退出码 12
+  const sshCmd = `ssh -i ${keyPath} -p ${sshPort} -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o BatchMode=yes -o LogLevel=ERROR`;
 
   const rsyncArgs = [
     '-az',                  // 归档 + 压缩
@@ -459,8 +460,11 @@ export async function rsyncUploadDeploy(options) {
   let rsync = null;
 
   try {
+    // Windows 上 rsync 是 MSYS2/Git Bash 程序，必须通过 shell 调用才能正确初始化
+    // 直接 spawn 会导致依赖库加载失败 → 退出码 12
     rsync = spawn('rsync', rsyncArgs, {
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: isWindows() // Windows: 通过 cmd.exe 调用，Unix: 直接 spawn
     });
 
     let lastProgress = Date.now();

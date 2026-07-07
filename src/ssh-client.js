@@ -183,7 +183,7 @@ export class SSHClient {
 
       // 超时定时器：如果 120 秒内没有任何数据或完成信号，强制 reject
       let timeoutTimer = null;
-      const STALL_TIMEOUT = 120000; // 120 秒无数据则判定为卡死
+      const STALL_TIMEOUT = 60000; // 60 秒无数据则判定为卡死
 
       const resetTimeout = () => {
         if (timeoutTimer) clearTimeout(timeoutTimer);
