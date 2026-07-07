@@ -26,10 +26,10 @@ export class SSHClient {
 
   /**
    * 建立 SSH 连接（带重试机制）
-   * @param {number} [maxRetries=3] - 最大重试次数
+   * @param {number} [maxRetries=5] - 最大重试次数
    * @returns {Promise<void>}
    */
-  async connect(maxRetries = 3) {
+  async connect(maxRetries = 5) {
     // 检查私钥文件是否存在且权限正确
     const keyPath = (this.config.sshKeyPath || '')
       .replace(/^~/, process.env.HOME || process.env.USERPROFILE || '/root');
@@ -40,14 +40,21 @@ export class SSHClient {
     let lastError;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
+        // 前一次失败后先销毁旧 client（避免残留 TCP 连接干扰新连接）
+        if (this.client) {
+          try { this.client.destroy(); } catch { /* 忽略 */ }
+        }
         await this._doConnect(keyPath);
         return; // 连接成功
       } catch (err) {
         lastError = err;
         if (attempt < maxRetries && this._isRetryableError(err)) {
-          const delay = Math.min(2000 * attempt, 10000); // 递增延迟: 2s, 4s, 6s... 最长10s
+          // 递增延迟 + 随机抖动（避免固定间隔与服务器限制节奏共振）
+          const baseDelay = Math.min(3000 * attempt, 15000); // 3s, 6s, 9s, 12s, 15s
+          const jitter = Math.floor(Math.random() * 2000);    // 0-2s 随机抖动
+          const delay = baseDelay + jitter;
           console.error(`\n⚠️  SSH 连接失败 (${attempt}/${maxRetries}): ${err.message}`);
-          console.error(`   等待 ${delay / 1000}s 后重试...`);
+          console.error(`   等待 ${(delay / 1000).toFixed(1)}s 后重试...`);
           await new Promise(resolve => setTimeout(resolve, delay));
         } else {
           throw err; // 不可重试或已达最大次数
