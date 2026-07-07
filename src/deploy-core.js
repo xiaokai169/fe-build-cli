@@ -246,13 +246,9 @@ async function swapDeployDir({ ssh, envConfig, tmpDeployDir, protectedDirs }) {
     // 无受保护目录：先确保目录存在，删除内容，再移入新文件
     // 删除内容而非删除目录本身，避免父目录权限问题
     await ssh.execCommand(
-      `mkdir -p ${deployDirEsc} 2>/dev/null; ` +
-      `rm -rf ${deployDirEsc}/* 2>/dev/null; ` +
-      `rm -rf ${deployDirEsc}/.[!.]* 2>/dev/null; ` +
-      `shopt -s dotglob 2>/dev/null; ` +
-      `if ls -A ${tmpDirEsc}/* ${tmpDirEsc}/.[!.]* 2>/dev/null >/dev/null; then ` +
-      `mv ${tmpDirEsc}/* ${tmpDirEsc}/.[!.]* ${deployDirEsc}/ 2>/dev/null; ` +
-      `else true; fi; ` +
+      `mkdir -p ${deployDirEsc} && ` +
+      `rm -rf ${deployDirEsc}/* ${deployDirEsc}/.[!.]* && ` +
+      `find ${tmpDirEsc} -mindepth 1 -maxdepth 1 -exec mv -t ${deployDirEsc}/ {} + && ` +
       `rm -rf ${tmpDirEsc}`
     );
   }
