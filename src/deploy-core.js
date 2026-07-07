@@ -4,7 +4,7 @@ import path from 'node:path';
 import process from 'node:process';
 import SSHClient from './ssh-client.js';
 import { DeployLogger, cleanLocalBackups } from './logger.js';
-import { formatBytes, shellEscape, parseBackupFilename } from './utils.js';
+import { formatBytes, shellEscape, parseBackupFilename, expandTilde } from './utils.js';
 
 /**
  * 获取服务器备份列表
@@ -372,6 +372,161 @@ export async function pipeUploadDeploy(options) {
 }
 
 /**
+ * 使用 rsync over SSH 增量同步部署
+ *
+ * 流程:
+ *   1. 备份现有部署（复用 backupExistingDeployment）
+ *   2. 创建远程临时目录 backupDir/deploy-rsync-tmp
+ *   3. rsync dist/ → 远程临时目录（增量同步，只传差异文件）
+ *   4. 原子交换 swapDeployDir() → deployDir
+ *
+ * rsync 通过 spawn 独立进程运行，自行管理 SSH 连接（RSYNC_RSH 环境变量）。
+ * 原有的 SSHClient 连接仍用于备份、目录准备和原子交换。
+ *
+ * @param {object} options
+ * @param {SSHClient} options.ssh
+ * @param {object} options.envConfig
+ * @param {string} options.buildVersion
+ * @param {DeployLogger} options.logger
+ */
+export async function rsyncUploadDeploy(options) {
+  const { ssh, envConfig, buildVersion, logger } = options;
+
+  // ====== A. 备份当前部署 ======
+  await backupExistingDeployment({ ssh, envConfig, buildVersion, logger });
+
+  // ====== B. 准备临时目录 ======
+  console.log('\n[步骤 3/7] 准备临时部署目录...');
+
+  const protectedDirs = envConfig.protectedDirs || [];
+  const tmpDeployDir = `${envConfig.backupDir}/deploy-rsync-tmp`;
+  const tmpDirEsc = shellEscape(tmpDeployDir);
+  const deployDirEsc = shellEscape(envConfig.deployDir);
+
+  await ssh.execCommand(`rm -rf ${tmpDirEsc} && mkdir -p ${tmpDirEsc}`);
+  await ssh.execCommand(`mkdir -p ${deployDirEsc}`);
+  console.log('✅ 临时部署目录已就绪');
+
+  // ====== C. rsync 增量同步 ======
+  console.log(`\n[步骤 4/7] rsync 增量同步 dist/ → ${envConfig.sshHost}...`);
+  console.log('  (rsync: 仅传输变更文件，支持断点续传)');
+
+  const keyPath = expandTilde(envConfig.sshKeyPath).replace(/\\/g, '/');
+  const sshPort = envConfig.sshPort || 22;
+
+  // RSYNC_RSH 环境变量方式（避免 -e 参数的引用嵌套问题）
+  const rshCmd = [
+    'ssh',
+    '-i', keyPath,
+    '-p', String(sshPort),
+    '-o', 'StrictHostKeyChecking=no',
+    '-o', 'ConnectTimeout=15',
+    '-o', 'BatchMode=yes'
+  ].join(' ');
+
+  const remoteTarget = `${envConfig.sshUser}@${envConfig.sshHost}:${tmpDeployDir}`;
+
+  const rsyncArgs = [
+    '-az',                  // 归档 + 压缩
+    '--delete',             // 删除远程多余文件
+    '--no-perms',
+    '--no-owner',
+    '--no-group',
+    '--info=progress2',     // 总进度（非每文件）
+    '--human-readable',
+    './dist/',              // 注意尾部 / = 复制内容而非目录本身
+    `${remoteTarget}/`
+  ];
+
+  // 排除受保护目录
+  for (const dir of protectedDirs) {
+    rsyncArgs.push('--exclude', dir);
+  }
+
+  const startTime = Date.now();
+  let rsync = null;
+
+  try {
+    rsync = spawn('rsync', rsyncArgs, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, RSYNC_RSH: rshCmd }
+    });
+
+    let lastProgress = Date.now();
+
+    // 解析 --info=progress2 输出: "1,234,567 100%  10.50MB/s  0:00:01 (xfr#123, to-chk=0/456)"
+    const progressRegex = /^\s*([\d,]+)\s+(\d+)%\s+([\d.]+[A-Za-z\/]+)\s/;
+
+    rsync.stdout.on('data', (data) => {
+      const lines = data.toString().split('\n');
+      for (const line of lines) {
+        const match = line.match(progressRegex);
+        if (match) {
+          const now = Date.now();
+          if (now - lastProgress > 200) {
+            lastProgress = now;
+            const bytes = parseInt(match[1].replace(/,/g, ''), 10);
+            const pct = parseInt(match[2], 10);
+            const speed = match[3];
+            const barW = 20;
+            const filled = Math.round((pct / 100) * barW);
+            const bar = '█'.repeat(filled) + '░'.repeat(barW - filled);
+            const elapsed = (now - startTime) / 1000;
+            process.stdout.write(
+              `\rrsync [${bar}] ${pct}%  ${formatBytes(bytes)}  ${speed}  ${elapsed.toFixed(0)}s`
+            );
+          }
+        }
+      }
+    });
+
+    rsync.stderr.on('data', () => { /* 静默权限警告 */ });
+
+    // 等待 rsync 完成
+    await new Promise((resolve, reject) => {
+      rsync.on('error', reject);
+      rsync.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`rsync 退出码: ${code}`));
+        }
+      });
+    });
+
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    process.stdout.write(`\r✅ rsync 同步完成 (${duration}s)                    \n`);
+    logger.logUpload('dist/', tmpDeployDir, 0, duration, true);
+
+  } catch (error) {
+    if (rsync && !rsync.killed) {
+      try { rsync.kill('SIGTERM'); } catch { /* 忽略 */ }
+    }
+    logger.logUpload('dist/', tmpDeployDir, 0, 0, false);
+
+    console.error('\n❌ rsync 传输失败，清理临时目录...');
+    try { await ssh.execCommand(`rm -rf ${tmpDirEsc}`); } catch { /* 忽略 */ }
+
+    // 尝试还原备份
+    const latestBackup = `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}.tar.zst`;
+    console.error('尝试还原备份...');
+    try {
+      await ssh.execCommand(`tar -xf ${shellEscape(latestBackup)} -C ${deployDirEsc}`);
+      console.log('✅ 已还原备份');
+    } catch {
+      console.error('⚠️  还原备份也失败了，请手动检查');
+    }
+    throw new Error(`rsync 传输失败: ${error.message}`);
+  }
+
+  // ====== D. 原子交换 ======
+  console.log('\n[步骤 5/7] 原子替换部署目录...');
+  await swapDeployDir({ ssh, envConfig, tmpDeployDir, protectedDirs });
+  console.log('✅ 部署目录已切换（零空窗期）');
+  logger.logDeploy(envConfig.deployDir, true);
+}
+
+/**
  * 上传构建产物（SFTP 降级模式）
  * @param {object} options - 选项
  */
@@ -493,6 +648,19 @@ export async function downloadBackup(options) {
 }
 
 /**
+ * 检测本地是否安装了 rsync 二进制文件
+ * @returns {boolean}
+ */
+export function checkRsyncAvailable() {
+  try {
+    execSync('rsync --version', { stdio: 'pipe', encoding: 'utf-8' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 执行部署到服务器
  * @param {object} options - 部署选项
  * @param {string} options.environment - 环境名称
@@ -505,7 +673,12 @@ export async function downloadBackup(options) {
  * @param {boolean} options.enableBackupDownload - 是否启用备份下载
  */
 export async function deployToServer(options) {
-  const { environment, envConfig, buildVersion, skipBuild = false, skipLocalCleanup = false, logger, localBackupDir, enableBackupDownload = true } = options;
+  const {
+    environment, envConfig, buildVersion,
+    skipBuild = false, skipLocalCleanup = false,
+    logger, localBackupDir, enableBackupDownload = true,
+    transferMode: cliTransferMode  // CLI --transfer 参数
+  } = options;
 
   if (!skipBuild) {
     buildProject(envConfig, buildVersion, logger);
@@ -515,51 +688,104 @@ export async function deployToServer(options) {
 
   const ssh = new SSHClient(envConfig);
 
-  // 传输策略：优先管道流直传，失败降级 SFTP
-  let usePipe = true;
+  // ====== 确定传输策略顺序 ======
+  // 优先级: CLI --transfer > 配置 transferMode > 自动检测
+  const configuredMode = cliTransferMode || envConfig.transferMode || 'auto';
 
-  console.log('\n📌 使用 tar + zstd 管道流直传模式');
+  /** @type {string[]} */
+  let strategies = [];
+
+  if (configuredMode === 'pipe') {
+    strategies = ['pipe', 'sftp'];
+    console.log('\n📌 传输模式: tar + zstd 管道流');
+  } else if (configuredMode === 'rsync') {
+    strategies = ['rsync', 'sftp'];
+    console.log('\n📌 传输模式: rsync 增量同步');
+  } else if (configuredMode === 'sftp') {
+    strategies = ['sftp'];
+    console.log('\n📌 传输模式: SFTP 上传');
+  } else {
+    // 自动: 检测 rsync 可用性
+    if (checkRsyncAvailable()) {
+      strategies = ['rsync', 'pipe', 'sftp'];
+      console.log('\n📌 本地 rsync 可用，优先使用 rsync 增量同步');
+    } else {
+      strategies = ['pipe', 'sftp'];
+      console.log('\n📌 使用 tar + zstd 管道流直传模式');
+    }
+  }
+
+  let finalMode = null;
 
   try {
     await ssh.connect();
     logger.logSSHConnect(envConfig.sshHost, true);
 
-    // ====== 方案A: tar 管道流直传 ======
-    if (usePipe) {
-      try {
-        await pipeUploadDeploy({ ssh, envConfig, buildVersion, logger });
-      } catch (pipeError) {
-        console.log('\n⚠️  管道流失败，降级为 SFTP 上传...');
-        console.log(`原因: ${pipeError.message}`);
-        usePipe = false;
+    for (const strategy of strategies) {
+      if (strategy === 'rsync') {
+        try {
+          // 检查远程 rsync 是否可用
+          const remoteCheck = await ssh.execCommand(
+            'command -v rsync 2>/dev/null && echo "AVAILABLE" || echo "NOT_FOUND"'
+          );
+          if (remoteCheck.includes('NOT_FOUND')) {
+            console.log('\n⚠️  服务器未安装 rsync，跳过');
+            logger.log('WARN', '传输降级', '服务器未安装 rsync');
+            continue;
+          }
+          await rsyncUploadDeploy({ ssh, envConfig, buildVersion, logger });
+          finalMode = 'rsync';
+          break;
+        } catch (rsyncError) {
+          console.log(`\n⚠️  rsync 失败 (${rsyncError.message})，降级...`);
+          logger.log('WARN', '传输降级', `rsync 失败: ${rsyncError.message}`);
+          try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-rsync-tmp')}`); } catch { /* 忽略 */ }
+          continue;
+        }
+      }
+
+      if (strategy === 'pipe') {
+        try {
+          await pipeUploadDeploy({ ssh, envConfig, buildVersion, logger });
+          finalMode = 'pipe';
+          break;
+        } catch (pipeError) {
+          console.log(`\n⚠️  管道流失败 (${pipeError.message})，降级...`);
+          logger.log('WARN', '传输降级', `管道流失败: ${pipeError.message}`);
+          try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-tmp')}`); } catch { /* 忽略 */ }
+          continue;
+        }
+      }
+
+      if (strategy === 'sftp') {
+        // ====== SFTP 上传（兜底）======
+        const localZipFile = `dist-${buildVersion}.tar.zst`;
+        const remoteZipFile = `${envConfig.backupDir}/${localZipFile}`;
+
+        compressBuild(localZipFile, logger);
+        await backupExistingDeployment({ ssh, envConfig, buildVersion, logger, suffix: '-sftp' });
+        await uploadBuild({ ssh, localZipFile, remoteZipFile, logger });
+
+        try {
+          await deployAndExtract({ ssh, envConfig, remoteZipFile, logger });
+        } catch (error) {
+          console.error('❌ 清理或解压失败!');
+          await ssh.disconnect();
+          throw error;
+        }
+
+        try {
+          await cleanupFiles({ ssh, remoteZipFile, localZipFile, skipLocalCleanup, logger });
+        } catch {
+          console.warn('⚠️  删除压缩包失败,但不影响部署');
+        }
+        finalMode = 'sftp';
+        break;
       }
     }
 
-    if (!usePipe) {
-      // ====== 方案B: SFTP 上传（兜底）======
-      const localZipFile = `dist-${buildVersion}.tar.zst`;
-      const remoteZipFile = `${envConfig.backupDir}/${localZipFile}`;
-
-      // 压缩本地构建产物
-      compressBuild(localZipFile, logger);
-
-      // 降级模式备份使用不同后缀，避免覆盖管道流阶段已创建的备份
-      await backupExistingDeployment({ ssh, envConfig, buildVersion, logger, suffix: '-sftp' });
-      await uploadBuild({ ssh, localZipFile, remoteZipFile, logger });
-
-      try {
-        await deployAndExtract({ ssh, envConfig, remoteZipFile, logger });
-      } catch (error) {
-        console.error('❌ 清理或解压失败!');
-        await ssh.disconnect();
-        throw error;
-      }
-
-      try {
-        await cleanupFiles({ ssh, remoteZipFile, localZipFile, skipLocalCleanup, logger });
-      } catch (error) {
-        console.warn('⚠️  删除压缩包失败,但不影响部署');
-      }
+    if (!finalMode) {
+      throw new Error('所有传输模式均失败');
     }
 
     // 下载线上备份到本地（仅在启用时执行）
@@ -579,19 +805,17 @@ export async function deployToServer(options) {
     console.log(`版本: ${buildVersion}`);
     console.log(`服务器: ${envConfig.sshHost}`);
     console.log(`地址: ${envConfig.deployUrl}`);
-    if (usePipe) {
-      console.log(`传输模式: tar + zstd 管道流直传`);
-    }
+    console.log(`传输模式: ${finalMode === 'rsync' ? 'rsync 增量同步' : finalMode === 'pipe' ? 'tar + zstd 管道流直传' : 'SFTP 上传'}`);
     console.log('========================================');
 
-    logger.log('SUCCESS', '部署完成', `环境: ${environment}, 版本: ${buildVersion}`);
+    logger.log('SUCCESS', '部署完成', `环境: ${environment}, 版本: ${buildVersion}, 传输: ${finalMode}`);
   } catch (error) {
     console.error('部署失败:', error);
     logger.log('ERROR', '部署失败', error.message);
     // 确保 SSH 连接关闭（带超时保护）
     try {
       await ssh.disconnect();
-    } catch (e) {
+    } catch {
       // 强制销毁连接
       try { ssh.client.destroy(); } catch { /* 最终兜底 */ }
     }

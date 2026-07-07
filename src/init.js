@@ -135,7 +135,7 @@ function generateConfigContent(answers, projectInfo) {
     productionBuildMode,
     enableDingtalk, dingtalkWebhook, dingtalkKeyword,
     enableBackupDownload, localBackupDir,
-    protectedDirs
+    protectedDirs, transferMode
   } = answers;
 
   let content = `/**
@@ -191,7 +191,9 @@ export default {
   content += `
 
       // 受保护目录（部署时不会被删除）
-      protectedDirs: ${JSON.stringify(protectedDirs || [])}
+      protectedDirs: ${JSON.stringify(protectedDirs || [])},
+      // 传输模式: 'pipe' | 'rsync' | 'sftp'
+      transferMode: '${transferMode || 'pipe'}'
     }`;
 
   // 如果用户也配置了测试服务器
@@ -209,7 +211,8 @@ export default {
       backupPrefix: '${answers.testBackupPrefix || 'backup-test'}',
       buildMode: 'test',
       buildCommand: '${buildTestCommand || buildCommand}',
-      protectedDirs: ${JSON.stringify(protectedDirs || [])}
+      protectedDirs: ${JSON.stringify(protectedDirs || [])},
+      transferMode: '${transferMode || 'pipe'}'
     }`;
   }
 
@@ -411,6 +414,15 @@ export async function runInit(options = {}) {
     ? protectedDirsInput.split(',').map(d => d.trim()).filter(Boolean)
     : [];
 
+  // 传输模式选择
+  console.log('\n传输模式:');
+  console.log('  1. pipe  — tar + zstd 管道流（默认，速度最快）');
+  console.log('  2. rsync — rsync 增量同步（仅传变更文件，需本地和远程都安装 rsync）');
+  console.log('  3. sftp  — SFTP 上传（最兼容，最慢）');
+  const transferChoice = await prompter.ask('请选择传输模式 (1): ') || '1';
+  const transferModeMap = { '1': 'pipe', '2': 'rsync', '3': 'sftp' };
+  answers.transferMode = transferModeMap[transferChoice] || 'pipe';
+
   console.log();
 
   // ====== 5. 是否配置测试服务器 ======
@@ -468,7 +480,7 @@ export async function runInit(options = {}) {
   console.log(`\n✅ 配置文件已保存: ${configPath}`);
 
   // 生成后提示
-  console.log('📌 部署传输: tar + zstd 管道流直传（压缩→传输→解压流水线）');
+  console.log(`📌 传输模式: ${answers.transferMode === 'rsync' ? 'rsync 增量同步' : answers.transferMode === 'sftp' ? 'SFTP 上传' : 'tar + zstd 管道流直传'}`);
 
   console.log('\n下一步:');
   console.log(`  1. 检查配置:    fe-build check production`);

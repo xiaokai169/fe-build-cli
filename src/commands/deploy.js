@@ -60,6 +60,16 @@ export async function deployCommand(config) {
   const skipCheck = args.includes('--skip-check');
   const yesMode = args.includes('--yes') || args.includes('-y');
 
+  // 解析 --transfer 参数
+  const transferIndex = args.indexOf('--transfer');
+  const transferMode = transferIndex !== -1 && args[transferIndex + 1]
+    ? args[transferIndex + 1]
+    : undefined;
+  if (transferMode && !['pipe', 'rsync', 'sftp'].includes(transferMode)) {
+    console.error(`⚠️  无效的传输模式: ${transferMode}，支持: pipe, rsync, sftp`);
+    console.error('将使用自动检测模式');
+  }
+
   // 获取目标环境（排除 deploy 命令本身）
   const argEnv = args.find(arg => arg !== 'deploy' && !arg.startsWith('--'));
   let selectedServers = [];
@@ -206,7 +216,8 @@ export async function deployCommand(config) {
         skipLocalCleanup: i < selectedServers.length - 1,
         logger,
         localBackupDir,
-        enableBackupDownload
+        enableBackupDownload,
+        transferMode: ['pipe', 'rsync', 'sftp'].includes(transferMode) ? transferMode : undefined
       });
 
       logger.end('success');

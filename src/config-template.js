@@ -72,6 +72,14 @@ export function validateConfig(config) {
           message: `部署 URL 格式不正确（需以 http 开头）: ${envConfig.deployUrl}`
         });
       }
+
+      // 传输模式校验
+      if (envConfig.transferMode && !['pipe', 'rsync', 'sftp'].includes(envConfig.transferMode)) {
+        errors.push({
+          field: `servers.${envName}.transferMode`,
+          message: `无效的传输模式: ${envConfig.transferMode}，支持: pipe, rsync, sftp`
+        });
+      }
     }
   }
 
@@ -169,7 +177,10 @@ export default {
       buildCommand: 'yarn build',            // 自定义构建命令（可选，默认根据 buildMode 自动选择）
 
       // 需要保护的目录（部署时不会被删除）
-      protectedDirs: ['webgl', 'uploads']    // 例如：webgl、uploads 等静态资源目录
+      protectedDirs: ['webgl', 'uploads'],   // 例如：webgl、uploads 等静态资源目录
+
+      // 传输模式（可选）: 'pipe' (默认) | 'rsync' (增量同步) | 'sftp'
+      // transferMode: 'pipe',
     },
 
     // 测试环境示例

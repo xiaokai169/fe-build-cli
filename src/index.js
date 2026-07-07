@@ -33,6 +33,8 @@ export {
 
 // 部署核心逻辑
 export {
+  checkRsyncAvailable,
+  rsyncUploadDeploy,
   pipeUploadDeploy,
   buildProject,
   verifyBuildOutput,

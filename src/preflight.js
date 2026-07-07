@@ -47,6 +47,7 @@ export async function runPreflightChecks(options) {
   results.push(checkGitAvailable());
   results.push(checkGitStatus());
   results.push(checkLocalSsh());
+  results.push(checkLocalRsync());
   results.push(...checkDiskSpace(quick));
 
   // ====== 远程环境检查 ======
@@ -63,7 +64,8 @@ export async function runPreflightChecks(options) {
       // 并行执行远程检查
       const remoteResults = await Promise.all([
         checkRemoteDiskSpace(ssh, envConfig),
-        checkRemoteDirPermissions(ssh, envConfig)
+        checkRemoteDirPermissions(ssh, envConfig),
+        checkRemoteRsync(ssh)
       ]);
       results.push(...remoteResults);
     }
@@ -294,6 +296,56 @@ function checkLocalSsh() {
       name: '本地 SSH 命令',
       status: 'warn',
       message: 'ssh 命令不可用，将降级为 SFTP 模式'
+    };
+  }
+}
+
+/**
+ * 检查本地 rsync 是否可用
+ */
+function checkLocalRsync() {
+  try {
+    const version = execSync('rsync --version', { encoding: 'utf-8' }).trim();
+    const firstLine = version.split('\n')[0];
+    return {
+      name: '本地 rsync',
+      status: 'pass',
+      message: `${firstLine}（将优先使用增量同步）`
+    };
+  } catch {
+    return {
+      name: '本地 rsync',
+      status: 'warn',
+      message: 'rsync 不可用（将使用 tar 管道流传输）'
+    };
+  }
+}
+
+/**
+ * 检查远程 rsync 是否可用
+ */
+async function checkRemoteRsync(ssh) {
+  try {
+    const result = await ssh.execCommand(
+      'command -v rsync 2>/dev/null && rsync --version 2>/dev/null | head -1 || echo "NOT_FOUND"'
+    );
+    if (result.includes('NOT_FOUND')) {
+      return {
+        name: '服务器 rsync',
+        status: 'warn',
+        message: '未安装 rsync（rsync 模式不可用）'
+      };
+    }
+    return {
+      name: '服务器 rsync',
+      status: 'pass',
+      message: result.trim()
+    };
+  } catch {
+    return {
+      name: '服务器 rsync',
+      status: 'warn',
+      message: '无法检测（rsync 模式可能不可用）'
     };
   }
 }
