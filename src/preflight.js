@@ -13,6 +13,8 @@ import os from 'node:os';
 import { execSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import SSHClient from './ssh-client.js';
+import { OBSClient } from './obs-client.js';
+import { resolveOBSConfig } from './deploy-core.js';
 import { checkUncommittedChanges, getCurrentBranch } from './git-branch.js';
 
 /**
@@ -62,11 +64,19 @@ export async function runPreflightChecks(options) {
 
     if (sshConnected) {
       // 并行执行远程检查
-      const remoteResults = await Promise.all([
+      const checks = [
         checkRemoteDiskSpace(ssh, envConfig),
         checkRemoteDirPermissions(ssh, envConfig),
         checkRemoteRsync(ssh)
-      ]);
+      ];
+
+      // 检查 OBS 连接（如果配置了 OBS）
+      const resolvedOBS = resolveOBSConfig(envConfig.obsConfig);
+      if (resolvedOBS) {
+        checks.push(checkOBSConnection(resolvedOBS));
+      }
+
+      const remoteResults = await Promise.all(checks);
       results.push(...remoteResults);
     }
   } catch (error) {
@@ -317,6 +327,28 @@ function checkLocalRsync() {
       name: '本地 rsync',
       status: 'warn',
       message: 'rsync 不可用（将使用 tar 管道流传输）'
+    };
+  }
+}
+
+/**
+ * 检查 OBS 连接
+ */
+async function checkOBSConnection(obsConfig) {
+  try {
+    const obsClient = new OBSClient(obsConfig);
+    // 尝试列出对象来验证连接
+    await obsClient.listObjects('');
+    return {
+      name: 'OBS 连接',
+      status: 'pass',
+      message: `桶: ${obsConfig.bucket}, Endpoint: ${obsConfig.endpoint}`
+    };
+  } catch (error) {
+    return {
+      name: 'OBS 连接',
+      status: 'warn',
+      message: `连接失败: ${error.message}（不影响非 OBS 部署）`
     };
   }
 }

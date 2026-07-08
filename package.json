@@ -36,7 +36,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "esdk-obs-nodejs": "^3.26.2",
     "ssh2": "^1.15.0"
-  },
-  "devDependencies": {}
+  }
 }

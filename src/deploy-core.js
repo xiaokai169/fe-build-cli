@@ -3,8 +3,47 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import SSHClient from './ssh-client.js';
+import { OBSClient } from './obs-client.js';
 import { DeployLogger, cleanLocalBackups } from './logger.js';
 import { formatBytes, shellEscape, parseBackupFilename, expandTilde, isWindows } from './utils.js';
+
+/**
+ * 解析 OBS 配置，用环境变量补齐缺失的敏感字段
+ *
+ * 支持的环境变量:
+ *   FE_BUILD_OBS_ACCESS_KEY_ID     — OBS Access Key ID
+ *   FE_BUILD_OBS_SECRET_ACCESS_KEY — OBS Secret Access Key
+ *
+ * 使用场景: fe-build.config.js 中只配置非敏感的 bucket/endpoint，
+ * AK/SK 通过环境变量注入，避免敏感信息提交到 Git。
+ *
+ * @param {object|undefined} obsConfig - 配置文件中的 obsConfig
+ * @returns {object|null} 合并后的完整 OBS 配置，或 null
+ */
+export function resolveOBSConfig(obsConfig) {
+  if (!obsConfig || !obsConfig.bucket) {
+    // 如果完全没有 obsConfig 但环境变量中有关键信息，也尝试构建
+    const envBucket = process.env.FE_BUILD_OBS_BUCKET;
+    const envEndpoint = process.env.FE_BUILD_OBS_ENDPOINT;
+    if (!envBucket && !envEndpoint) return null;
+
+    return {
+      bucket: envBucket || '',
+      endpoint: envEndpoint || '',
+      internalEndpoint: process.env.FE_BUILD_OBS_INTERNAL_ENDPOINT || envEndpoint || '',
+      accessKeyId: process.env.FE_BUILD_OBS_ACCESS_KEY_ID || '',
+      secretAccessKey: process.env.FE_BUILD_OBS_SECRET_ACCESS_KEY || '',
+      uploadDir: process.env.FE_BUILD_OBS_UPLOAD_DIR || ''
+    };
+  }
+
+  // 以配置文件为主，环境变量兜底补齐 AK/SK
+  return {
+    ...obsConfig,
+    accessKeyId: obsConfig.accessKeyId || process.env.FE_BUILD_OBS_ACCESS_KEY_ID || '',
+    secretAccessKey: obsConfig.secretAccessKey || process.env.FE_BUILD_OBS_SECRET_ACCESS_KEY || ''
+  };
+}
 
 /**
  * 获取服务器备份列表
@@ -168,9 +207,11 @@ export function compressBuild(localZipFile, logger) {
 
   try {
     // Windows 自带的 tar 不支持 -I (--use-compress-program)，改用管道方式
+    // 注意: Windows 上 execSync 使用 cmd.exe，不支持单引号（shellEscape 是 POSIX 风格）
+    // 文件名由 buildVersion 生成，不含空格/特殊字符，无需转义
     if (isWindows()) {
       execSync(
-        `tar -cf - -C dist . | zstd -T0 -o ${shellEscape(localZipFile)}`,
+        `tar -cf - -C dist . | zstd -T0 -o "${localZipFile}"`,
         { stdio: 'inherit' }
       );
     } else {
@@ -428,7 +469,7 @@ export async function rsyncUploadDeploy(options) {
 
   // ====== C. rsync 增量同步 ======
   console.log(`\n[步骤 4/7] rsync 增量同步 dist/ → ${envConfig.sshHost}...`);
-  console.log('  (rsync: 仅传输变更文件，支持断点续传)');
+  console.log('  (rsync: 仅传输变更文件，重试 1 次 + 超时保护)');
 
   const keyPath = expandTilde(envConfig.sshKeyPath).replace(/\\/g, '/');
   const sshPort = envConfig.sshPort || 22;
@@ -446,6 +487,7 @@ export async function rsyncUploadDeploy(options) {
     '--no-group',
     '--info=progress2',     // 总进度（非每文件）
     '--human-readable',
+    '--timeout=120',        // rsync 内置超时：120s 无传输则退出
     '-e', sshCmd,           // SSH 命令（数组方式避免引用嵌套）
     './dist/',              // 注意尾部 / = 复制内容而非目录本身
     `${remoteTarget}/`
@@ -456,23 +498,39 @@ export async function rsyncUploadDeploy(options) {
     rsyncArgs.push('--exclude', dir);
   }
 
-  const startTime = Date.now();
-  let rsync = null;
+  /**
+   * 执行一次 rsync 同步
+   * @returns {Promise<number>} 耗时（秒）
+   */
+  const runRsyncOnce = () => new Promise((resolve, reject) => {
+    const startTime = Date.now();
+    let rsyncProc = null;
 
-  try {
-    // Windows 上 rsync 是 MSYS2/Git Bash 程序，必须通过 shell 调用才能正确初始化
-    // 直接 spawn 会导致依赖库加载失败 → 退出码 12
-    rsync = spawn('rsync', rsyncArgs, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      shell: isWindows() // Windows: 通过 cmd.exe 调用，Unix: 直接 spawn
-    });
+    // 总超时定时器：5 分钟无结果强制 kill（rsync --timeout 只管 I/O 超时）
+    const hardTimeout = setTimeout(() => {
+      if (rsyncProc && !rsyncProc.killed) {
+        try { rsyncProc.kill('SIGTERM'); } catch { /* 忽略 */ }
+      }
+    }, 300000); // 5 分钟硬超时
+
+    try {
+      // Windows 上 rsync 是 MSYS2/Git Bash 程序，必须通过 shell 调用才能正确初始化
+      rsyncProc = spawn('rsync', rsyncArgs, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: isWindows()
+      });
+    } catch (err) {
+      clearTimeout(hardTimeout);
+      reject(err);
+      return;
+    }
 
     let lastProgress = Date.now();
 
-    // 解析 --info=progress2 输出: "1,234,567 100%  10.50MB/s  0:00:01 (xfr#123, to-chk=0/456)"
+    // 解析 --info=progress2 输出
     const progressRegex = /^\s*([\d,]+)\s+(\d+)%\s+([\d.]+[A-Za-z\/]+)\s/;
 
-    rsync.stdout.on('data', (data) => {
+    rsyncProc.stdout.on('data', (data) => {
       const lines = data.toString().split('\n');
       for (const line of lines) {
         const match = line.match(progressRegex);
@@ -495,28 +553,50 @@ export async function rsyncUploadDeploy(options) {
       }
     });
 
-    rsync.stderr.on('data', () => { /* 静默权限警告 */ });
+    rsyncProc.stderr.on('data', () => { /* 静默权限警告 */ });
 
-    // 等待 rsync 完成
-    await new Promise((resolve, reject) => {
-      rsync.on('error', reject);
-      rsync.on('close', (code) => {
-        if (code === 0) {
-          resolve();
-        } else {
-          reject(new Error(`rsync 退出码: ${code}`));
-        }
-      });
+    rsyncProc.on('error', (err) => {
+      clearTimeout(hardTimeout);
+      reject(err);
     });
 
-    const duration = Math.round((Date.now() - startTime) / 1000);
-    process.stdout.write(`\r✅ rsync 同步完成 (${duration}s)                    \n`);
-    logger.logUpload('dist/', tmpDeployDir, 0, duration, true);
+    rsyncProc.on('close', (code) => {
+      clearTimeout(hardTimeout);
+      const duration = Math.round((Date.now() - startTime) / 1000);
+      if (code === 0) {
+        resolve(duration);
+      } else {
+        reject(new Error(`rsync 退出码: ${code}`));
+      }
+    });
+  });
 
-  } catch (error) {
-    if (rsync && !rsync.killed) {
-      try { rsync.kill('SIGTERM'); } catch { /* 忽略 */ }
+  // 重试循环（最多 2 次）
+  let lastError = null;
+  let rsyncSuccess = false;
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    if (attempt > 1) {
+      console.log(`\n🔄 rsync 重试 (${attempt}/2)...`);
+      // 重试前等待 2 秒
+      await new Promise(r => setTimeout(r, 2000));
     }
+
+    try {
+      const duration = await runRsyncOnce();
+      process.stdout.write(`\r✅ rsync 同步完成 (${duration}s)                    \n`);
+      logger.logUpload('dist/', tmpDeployDir, 0, duration, true);
+      rsyncSuccess = true;
+      break;
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) {
+        console.error(`\n⚠️  rsync 失败 (${error.message})，准备重试...`);
+      }
+    }
+  }
+
+  if (!rsyncSuccess) {
     logger.logUpload('dist/', tmpDeployDir, 0, 0, false);
 
     console.error('\n❌ rsync 传输失败，清理临时目录...');
@@ -531,7 +611,7 @@ export async function rsyncUploadDeploy(options) {
     } catch {
       console.error('⚠️  还原备份也失败了，请手动检查');
     }
-    throw new Error(`rsync 传输失败: ${error.message}`);
+    throw new Error(`rsync 传输失败: ${lastError.message}`);
   }
 
   // ====== D. 原子交换 ======
@@ -675,6 +755,255 @@ export function checkRsyncAvailable() {
   }
 }
 
+// ====== OBS 中转部署（华为云对象存储） ======
+
+/**
+ * OBS 模式备份现有部署
+ * 服务器 tar+zstd 压缩 → curl PUT 上传到 OBS（内网）→ 清理服务器临时文件
+ * @param {object} options
+ */
+async function backupToOBS(options) {
+  const { ssh, envConfig, buildVersion, obsClient, logger } = options;
+  console.log('\n[步骤 4/7] 备份现有部署到 OBS...');
+
+  const backupFilename = `${envConfig.backupPrefix}-${buildVersion}.tar.zst`;
+  const remoteTempDir = `${envConfig.backupDir}/.obs-backup-tmp`;
+  const remoteTempFile = `${remoteTempDir}/${backupFilename}`;
+  const remoteTempDirEsc = shellEscape(remoteTempDir);
+  const remoteTempFileEsc = shellEscape(remoteTempFile);
+  const deployDirEsc = shellEscape(envConfig.deployDir);
+
+  // 检查部署目录是否有文件
+  const checkResult = await ssh.execCommand(
+    `[ -d ${deployDirEsc} ] && [ "$(ls -A ${deployDirEsc} 2>/dev/null)" ] && echo 'has_files' || echo 'empty'`
+  );
+
+  if (!checkResult.includes('has_files')) {
+    logger.log('INFO', 'OBS 备份', '部署目录为空或不存在，跳过备份');
+    console.log('部署目录为空或不存在，跳过 OBS 备份');
+    return;
+  }
+
+  try {
+    // 1. 创建临时目录并在服务器上压缩现有部署
+    console.log('  压缩现有部署（服务器端 tar+zstd）...');
+    await ssh.execCommand(`mkdir -p ${remoteTempDirEsc}`);
+    const protectedDirs = envConfig.protectedDirs || [];
+    const excludeArgs = protectedDirs.map(d => `--exclude=${shellEscape('./' + d)}`).join(' ');
+    const tarCmd = protectedDirs.length > 0
+      ? `tar -I zstd -cf ${remoteTempFileEsc} ${excludeArgs} -C ${deployDirEsc} .`
+      : `tar -I zstd -cf ${remoteTempFileEsc} -C ${deployDirEsc} .`;
+    await ssh.execCommand(tarCmd);
+    console.log('✅ 服务器端压缩完成');
+
+    // 2. 生成 OBS 预签名上传 URL（使用内网 endpoint）
+    console.log('  生成 OBS 预签名上传 URL（内网）...');
+    const presignedUploadUrl = obsClient.getSignedUrl(backupFilename, 3600, 'PUT', true);
+
+    // 3. SSH 服务器用 curl 上传备份到 OBS（内网）
+    console.log('  服务器上传备份到 OBS（内网）...');
+    const startTime = Date.now();
+    await ssh.execCommand(
+      `curl -s -X PUT -T ${remoteTempFileEsc} "${presignedUploadUrl}"`
+    );
+    const duration = Math.round((Date.now() - startTime) / 1000);
+    console.log(`✅ OBS 备份上传完成 (${duration}s)`);
+
+    logger.logBackup(`obs://${obsClient.bucket}/${backupFilename}`, true);
+
+    // 4. 清理服务器临时文件
+    await ssh.execCommand(`rm -rf ${remoteTempDirEsc}`);
+
+    // 5. 按保留策略清理 OBS 旧备份
+    const retentionCount = envConfig.backupRetentionCount || 1;
+    await cleanOldOBSBackups(obsClient, envConfig.backupPrefix, retentionCount, logger);
+
+  } catch (error) {
+    // 清理服务器临时文件
+    try { await ssh.execCommand(`rm -rf ${remoteTempDirEsc}`); } catch { /* 忽略 */ }
+    logger.logBackup(`obs://${obsClient.bucket}/${backupFilename}`, false);
+    console.warn(`⚠️  OBS 备份上传失败: ${error.message}`);
+    // 备份失败不阻断部署主流程
+  }
+}
+
+/**
+ * 清理 OBS 上旧的备份文件，保留最新 N 个
+ * @param {OBSClient} obsClient
+ * @param {string} prefix - 备份前缀
+ * @param {number} retentionCount - 保留数量
+ * @param {DeployLogger} logger
+ */
+async function cleanOldOBSBackups(obsClient, prefix, retentionCount, logger) {
+  try {
+    const objects = await obsClient.listObjects(prefix);
+    if (objects.length <= retentionCount) return;
+
+    // 按 lastModified 降序排列，删除多余的
+    objects.sort((a, b) => b.lastModified - a.lastModified);
+    const toDelete = objects.slice(retentionCount);
+
+    for (const obj of toDelete) {
+      // 从完整 key 中移除 uploadDir 前缀，获取相对 key
+      const relKey = obsClient.uploadDir
+        ? obj.key.substring(obsClient.uploadDir.length + 1)
+        : obj.key;
+      await obsClient.deleteObject(relKey);
+      console.log(`  🗑️ 删除旧 OBS 备份: ${obj.key}`);
+    }
+    if (toDelete.length > 0) {
+      console.log(`✅ OBS 旧备份清理完成（删除 ${toDelete.length} 个，保留 ${retentionCount} 个）`);
+      logger.log('INFO', 'OBS 备份清理', `删除了 ${toDelete.length} 个旧备份`);
+    }
+  } catch (error) {
+    console.warn('⚠️ OBS 旧备份清理失败:', error.message);
+  }
+}
+
+/**
+ * SSH 到服务器从 OBS 下载构建产物并部署
+ * @param {object} options
+ */
+async function obsServerDeploy(options) {
+  const { ssh, envConfig, downloadUrl, logger } = options;
+  console.log('\n[步骤 6/7] 服务器从 OBS 内网拉取构建产物...');
+
+  const protectedDirs = envConfig.protectedDirs || [];
+  const tmpDeployDir = `${envConfig.backupDir}/deploy-obs-tmp`;
+  const tmpDirEsc = shellEscape(tmpDeployDir);
+  const deployDirEsc = shellEscape(envConfig.deployDir);
+  const remoteZipPath = `${tmpDeployDir}/build.tar.zst`;
+  const remoteZipEsc = shellEscape(remoteZipPath);
+
+  // 准备临时目录
+  await ssh.execCommand(`rm -rf ${tmpDirEsc} && mkdir -p ${tmpDirEsc}`);
+  await ssh.execCommand(`mkdir -p ${deployDirEsc}`);
+  console.log('✅ 临时部署目录已就绪');
+
+  const startTime = Date.now();
+
+  try {
+    // 服务器 curl 下载（内网）
+    console.log('  服务器下载中（curl）...');
+    await ssh.execCommand(`curl -sL -o ${remoteZipEsc} "${downloadUrl}"`);
+    const downloadDuration = Math.round((Date.now() - startTime) / 1000);
+    console.log(`✅ OBS 拉取完成 (${downloadDuration}s)`);
+    logger.logUpload('OBS', envConfig.deployDir, 0, downloadDuration, true);
+
+    // 解压到临时目录
+    console.log('\n[步骤 7/7] 解压构建产物 + 原子替换...');
+    await ssh.execCommand(`tar -xf ${remoteZipEsc} -C ${tmpDirEsc}`);
+    console.log('✅ 解压完成');
+
+    // 删除远程压缩包
+    await ssh.execCommand(`rm -f ${remoteZipEsc}`);
+
+    // 原子替换
+    await swapDeployDir({ ssh, envConfig, tmpDeployDir, protectedDirs });
+    console.log('✅ 部署目录已切换（零空窗期）');
+    logger.logDeploy(envConfig.deployDir, true);
+
+  } catch (error) {
+    // 清理远程临时目录
+    try { await ssh.execCommand(`rm -rf ${tmpDirEsc}`); } catch { /* 忽略 */ }
+    throw new Error(`OBS 服务器部署失败: ${error.message}`);
+  }
+}
+
+/**
+ * OBS 中转部署模式（主函数）
+ *
+ * 流程:
+ *   1. 备份现有部署到 OBS
+ *   2. 压缩本地构建产物
+ *   3. 上传压缩包到 OBS（公网）
+ *   4. 生成预签名下载 URL（内网）
+ *   5. SSH 服务器 curl 下载（内网）→ 解压 → 原子替换
+ *   6. 清理本地压缩包
+ *
+ * @param {object} options
+ */
+export async function obsUploadDeploy(options) {
+  const { ssh, envConfig, buildVersion, logger, skipBackup = false } = options;
+
+  const obsClient = new OBSClient(envConfig.obsConfig);
+  const obsObjectKey = `${envConfig.backupPrefix}-${buildVersion}.tar.zst`;
+  const localZipFile = `dist-${buildVersion}.tar.zst`;
+
+  try {
+    // ====== A. 备份现有部署到 OBS ======
+    if (!skipBackup) {
+      await backupToOBS({ ssh, envConfig, buildVersion, obsClient, logger });
+    } else {
+      console.log('  (跳过备份，前面策略已创建)');
+    }
+
+    // ====== B. 压缩本地构建产物 ======
+    compressBuild(localZipFile, logger);
+
+    // ====== C. 上传压缩包到 OBS（公网） ======
+    console.log('\n[步骤 5/7] 上传构建产物到 OBS...');
+    const obsResult = await obsClient.uploadFile(localZipFile, obsObjectKey);
+    const stats = fs.statSync(localZipFile);
+    logger.logOBS('上传', obsResult.bucket, obsResult.key, true);
+
+    // ====== D. 生成预签名下载 URL（使用内网 endpoint） ======
+    const downloadUrl = obsClient.getSignedUrl(obsObjectKey, 3600, 'GET', true);
+
+    // ====== E. SSH 到服务器 → curl 下载 → 解压 → 原子替换 ======
+    await obsServerDeploy({ ssh, envConfig, downloadUrl, logger });
+
+    // ====== F. 清理本地压缩包 ======
+    try {
+      fs.unlinkSync(localZipFile);
+      console.log('✅ 本地压缩包已删除');
+    } catch (e) {
+      console.warn('⚠️ 本地压缩包删除失败:', e.message);
+    }
+
+  } catch (error) {
+    // 清理本地压缩包（保留下载给降级策略使用）
+    try { if (fs.existsSync(localZipFile)) fs.unlinkSync(localZipFile); } catch { /* 忽略 */ }
+    logger.logDeploy(envConfig.deployDir, false);
+    throw error;
+  }
+}
+
+/**
+ * 获取 OBS 上的备份列表（用于回滚）
+ * @param {object} envConfig - 环境配置（含 obsConfig）
+ * @returns {Promise<Array>}
+ */
+export async function getOBSBackupList(envConfig) {
+  const obsConfig = resolveOBSConfig(envConfig.obsConfig);
+  if (!obsConfig) return [];
+
+  try {
+    const obsClient = new OBSClient(obsConfig);
+    const objects = await obsClient.listObjects(envConfig.backupPrefix);
+
+    return objects.map(obj => {
+      const filename = obsClient.uploadDir
+        ? obj.key.substring(obsClient.uploadDir.length + 1)
+        : obj.key;
+      const parsed = parseBackupFilename(filename);
+      return {
+        file: obj.key,
+        filename,
+        prefix: parsed?.prefix,
+        version: parsed?.version || filename.replace(/\.tar\.zst$/, ''),
+        mtime: obj.lastModified,
+        size: obj.size,
+        isServer: false,
+        isOBS: true
+      };
+    });
+  } catch (error) {
+    console.warn('⚠️ 获取 OBS 备份列表失败:', error.message);
+    return [];
+  }
+}
+
 /**
  * 执行部署到服务器
  * @param {object} options - 部署选项
@@ -689,11 +1018,15 @@ export function checkRsyncAvailable() {
  */
 export async function deployToServer(options) {
   const {
-    environment, envConfig, buildVersion,
+    environment,
+    buildVersion,
     skipBuild = false, skipLocalCleanup = false,
     logger, localBackupDir, enableBackupDownload = true,
     transferMode: cliTransferMode  // CLI --transfer 参数
   } = options;
+
+  // envConfig 可能在 OBS 策略中被合并环境变量，因此从 options 动态读取
+  let envConfig = options.envConfig;
 
   if (!skipBuild) {
     buildProject(envConfig, buildVersion, logger);
@@ -707,10 +1040,21 @@ export async function deployToServer(options) {
   // 优先级: CLI --transfer > 配置 transferMode > 自动检测
   const configuredMode = cliTransferMode || envConfig.transferMode || 'auto';
 
+  // 检查是否配置了 OBS（配置文件 + 环境变量合并）
+  const resolvedOBSConfig = resolveOBSConfig(envConfig.obsConfig);
+  const hasOBSConfig = !!(resolvedOBSConfig && resolvedOBSConfig.bucket);
+  // 将合并后的配置回写，确保后续 OBS 操作拿到完整凭证
+  if (resolvedOBSConfig) {
+    envConfig = { ...envConfig, obsConfig: resolvedOBSConfig };
+  }
+
   /** @type {string[]} */
   let strategies = [];
 
-  if (configuredMode === 'pipe') {
+  if (configuredMode === 'obs') {
+    strategies = ['obs', 'rsync', 'sftp'];
+    console.log('\n📌 传输模式: OBS 中转部署（显式指定）');
+  } else if (configuredMode === 'pipe') {
     strategies = ['pipe', 'sftp'];
     console.log('\n📌 传输模式: tar + zstd 管道流（显式指定）');
   } else if (configuredMode === 'rsync') {
@@ -738,6 +1082,20 @@ export async function deployToServer(options) {
     logger.logSSHConnect(envConfig.sshHost, true);
 
     for (const strategy of strategies) {
+      if (strategy === 'obs') {
+        try {
+          await obsUploadDeploy({ ssh, envConfig, buildVersion, logger, skipBackup: backupDone });
+          finalMode = 'obs';
+          break;
+        } catch (obsError) {
+          backupDone = true;
+          console.log(`\n⚠️  OBS 中转失败 (${obsError.message})，降级...`);
+          logger.log('WARN', '传输降级', `OBS 失败: ${obsError.message}`);
+          try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-obs-tmp')}`); } catch { /* 忽略 */ }
+          continue;
+        }
+      }
+
       if (strategy === 'rsync') {
         try {
           // 检查远程 rsync 是否可用
@@ -811,9 +1169,11 @@ export async function deployToServer(options) {
       throw new Error('所有传输模式均失败');
     }
 
-    // 下载线上备份到本地（仅在启用时执行）
-    if (enableBackupDownload && localBackupDir) {
+    // 下载线上备份到本地（OBS 模式下跳过，备份已在 OBS 上）
+    if (enableBackupDownload && localBackupDir && finalMode !== 'obs') {
       await downloadBackup({ ssh, envConfig, buildVersion, localBackupDir, logger });
+    } else if (finalMode === 'obs') {
+      console.log('\n📌 OBS 模式：备份已存储在 OBS，跳过本地下载');
     }
 
     await ssh.disconnect();
@@ -828,7 +1188,13 @@ export async function deployToServer(options) {
     console.log(`版本: ${buildVersion}`);
     console.log(`服务器: ${envConfig.sshHost}`);
     console.log(`地址: ${envConfig.deployUrl}`);
-    console.log(`传输模式: ${finalMode === 'rsync' ? 'rsync 增量同步' : finalMode === 'pipe' ? 'tar + zstd 管道流直传' : 'SFTP 上传'}`);
+    const modeNames = {
+      obs: 'OBS 中转部署',
+      rsync: 'rsync 增量同步',
+      pipe: 'tar + zstd 管道流直传',
+      sftp: 'SFTP 上传'
+    };
+    console.log(`传输模式: ${modeNames[finalMode] || finalMode}`);
     console.log('========================================');
 
     logger.log('SUCCESS', '部署完成', `环境: ${environment}, 版本: ${buildVersion}, 传输: ${finalMode}`);

@@ -4,7 +4,8 @@
 import path from 'node:path';
 import os from 'node:os';
 import SSHClient from '../ssh-client.js';
-import { rollbackDeployment, getServerBackupList, getLocalBackupList, rollbackFromLocal } from '../deploy-core.js';
+import { OBSClient } from '../obs-client.js';
+import { rollbackDeployment, getServerBackupList, getLocalBackupList, getOBSBackupList, rollbackFromLocal, resolveOBSConfig } from '../deploy-core.js';
 import { sendRollbackNotification } from '../dingtalk.js';
 import { DeployLogger } from '../logger.js';
 import { createPrompter, getServerNames, getServerConfig } from './_helpers.js';
@@ -80,6 +81,7 @@ export async function rollbackCommand(config) {
       // 获取备份列表
       let serverBackups = [];
       let localBackups = [];
+      let obsBackups = [];
 
       console.log('\n[步骤 1] 获取服务器备份列表...');
       serverBackups = await getServerBackupList(ssh, envConfig);
@@ -89,7 +91,14 @@ export async function rollbackCommand(config) {
       localBackups = getLocalBackupList(localBackupDir, envConfig.backupPrefix);
       console.log(`找到 ${localBackups.length} 个本地备份`);
 
-      if (serverBackups.length === 0 && localBackups.length === 0) {
+      // 如果有 OBS 配置，获取 OBS 备份列表
+      if (envConfig.obsConfig) {
+        console.log('\n[步骤 3] 获取 OBS 备份列表...');
+        obsBackups = await getOBSBackupList(envConfig);
+        console.log(`找到 ${obsBackups.length} 个 OBS 备份`);
+      }
+
+      if (serverBackups.length === 0 && localBackups.length === 0 && obsBackups.length === 0) {
         logger.log('ERROR', '获取备份', '未找到任何备份文件');
         console.error('❌ 未找到任何备份文件!');
         await ssh.disconnect();
@@ -98,36 +107,59 @@ export async function rollbackCommand(config) {
       }
 
       // 确定备份来源
-      if (useLocalBackup && localBackups.length > 0) {
+      const hasOBS = obsBackups.length > 0;
+      const hasLocal = localBackups.length > 0;
+      const hasServer = serverBackups.length > 0;
+
+      if (useLocalBackup && hasLocal) {
         backupSource = 'local';
-      } else if (useServerBackup && serverBackups.length > 0) {
+      } else if (useServerBackup && hasServer) {
         backupSource = 'server';
       } else if (!useLocalBackup && !useServerBackup) {
         if (yesMode) {
-          backupSource = 'server';
-          console.log('\n📌 一键模式：默认使用服务器备份');
+          // 一键模式：优先 OBS > 服务器 > 本地
+          backupSource = hasOBS ? 'obs' : (hasServer ? 'server' : 'local');
+          console.log(`\n📌 一键模式：默认使用${backupSource === 'obs' ? 'OBS' : backupSource === 'server' ? '服务器' : '本地'}备份`);
         } else {
           const prompter = createPrompter();
           console.log('\n========================================');
           console.log('  📦 选择备份来源');
           console.log('========================================');
-          console.log(`  1. 服务器备份 (${serverBackups.length} 个) - 默认`);
-          if (localBackups.length > 0) {
-            console.log(`  2. 本地备份 (${localBackups.length} 个)`);
+          let optIdx = 1;
+          if (hasServer) {
+            console.log(`  ${optIdx}. 服务器备份 (${serverBackups.length} 个)`);
+            optIdx++;
+          }
+          if (hasLocal) {
+            console.log(`  ${optIdx}. 本地备份 (${localBackups.length} 个)`);
+            optIdx++;
+          }
+          if (hasOBS) {
+            console.log(`  ${optIdx}. OBS 备份 (${obsBackups.length} 个)`);
+            optIdx++;
           }
           console.log('========================================');
 
-          const sourceAnswer = await prompter.ask(`请选择备份来源 (1${localBackups.length > 0 ? '/2' : ''}): `);
+          const sourceAnswer = await prompter.ask('请选择备份来源: ');
           prompter.close();
-          if (sourceAnswer === '2' && localBackups.length > 0) {
-            backupSource = 'local';
-          } else {
+
+          const choice = parseInt(sourceAnswer, 10);
+          // 映射选项到来源（server 始终是第一个，local 第二，obs 第三）
+          if (hasServer && choice === 1) {
             backupSource = 'server';
+          } else if (hasLocal && choice === (hasServer ? 2 : 1)) {
+            backupSource = 'local';
+          } else if (hasOBS && choice === (hasServer + hasLocal + 1)) {
+            backupSource = 'obs';
+          } else {
+            // 默认使用第一个可用的
+            backupSource = hasServer ? 'server' : (hasLocal ? 'local' : 'obs');
           }
         }
       }
 
-      const backups = backupSource === 'server' ? serverBackups : localBackups;
+      const backupMap = { server: serverBackups, local: localBackups, obs: obsBackups };
+      const backups = backupMap[backupSource] || [];
 
       if (yesMode) {
         selectedBackup = backups[0];
@@ -173,6 +205,31 @@ export async function rollbackCommand(config) {
         logger
       });
       backupFile = remoteFile;
+    }
+
+    // 如果是 OBS 备份，需要先下载到服务器
+    if (backupSource === 'obs' && selectedBackup) {
+      console.log('\n[步骤] 从 OBS 下载备份到服务器...');
+      const obsConfig = resolveOBSConfig(envConfig.obsConfig);
+      const obsClient = new OBSClient(obsConfig);
+
+      // 从完整 key 中提取相对文件名
+      const relKey = obsClient.uploadDir
+        ? selectedBackup.file.substring(obsClient.uploadDir.length + 1)
+        : selectedBackup.file;
+
+      // 生成预签名下载 URL（内网）
+      const downloadUrl = obsClient.getSignedUrl(relKey, 3600, 'GET', true);
+
+      // SSH 服务器从 OBS 内网下载
+      const serverBackupPath = `${envConfig.backupDir}/${selectedBackup.filename}`;
+      await ssh.execCommand(
+        `mkdir -p ${envConfig.backupDir} && curl -sL -o "${serverBackupPath}" "${downloadUrl}"`
+      );
+      console.log('✅ OBS 备份已下载到服务器');
+      logger.log('SUCCESS', 'OBS 备份下载', `已下载到服务器: ${serverBackupPath}`);
+
+      backupFile = serverBackupPath;
     }
 
     // 执行回滚

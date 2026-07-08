@@ -135,7 +135,9 @@ function generateConfigContent(answers, projectInfo) {
     productionBuildMode,
     enableDingtalk, dingtalkWebhook, dingtalkKeyword,
     enableBackupDownload, localBackupDir,
-    protectedDirs, transferMode
+    protectedDirs, transferMode,
+    enableOBS, obsBucket, obsEndpoint, obsInternalEndpoint,
+    obsAccessKeyId, obsSecretAccessKey, obsUploadDir
   } = answers;
 
   let content = `/**
@@ -192,8 +194,27 @@ export default {
 
       // 受保护目录（部署时不会被删除）
       protectedDirs: ${JSON.stringify(protectedDirs || [])},
-      // 传输模式: 'pipe' | 'rsync' | 'sftp'
-      transferMode: '${transferMode || 'pipe'}'
+      // 传输模式: 'pipe' | 'rsync' | 'sftp' | 'obs'
+      transferMode: '${transferMode || 'pipe'}'`;
+
+  if (enableOBS) {
+    content += `,
+      // 华为云 OBS 中转部署配置
+      obsConfig: {
+        bucket: '${obsBucket || 'your-bucket'}',
+        endpoint: '${obsEndpoint || 'obs.cn-north-4.myhuaweicloud.com'}',
+        internalEndpoint: '${obsInternalEndpoint || obsEndpoint || 'obs.cn-north-4.myhuaweicloud.com'}',
+        accessKeyId: '${obsAccessKeyId || 'your-ak'}',
+        secretAccessKey: '${obsSecretAccessKey || 'your-sk'}'`;
+    if (obsUploadDir) {
+      content += `,
+        uploadDir: '${obsUploadDir}'`;
+    }
+    content += `
+      }`;
+  }
+
+  content += `
     }`;
 
   // 如果用户也配置了测试服务器
@@ -419,13 +440,29 @@ export async function runInit(options = {}) {
   console.log('  1. sftp  — SFTP 上传（默认推荐，稳定可靠）');
   console.log('  2. rsync — rsync 增量同步（仅传变更文件，需本地和远程都安装 rsync）');
   console.log('  3. pipe  — tar + zstd 管道流（速度最快但依赖 SSH 通道稳定性）');
+  console.log('  4. obs   — OBS 中转部署（上传到华为云 OBS，服务器内网拉取）');
   const transferChoice = await prompter.ask('请选择传输模式 (1): ') || '1';
-  const transferModeMap = { '1': 'sftp', '2': 'rsync', '3': 'pipe' };
+  const transferModeMap = { '1': 'sftp', '2': 'rsync', '3': 'pipe', '4': 'obs' };
   answers.transferMode = transferModeMap[transferChoice] || 'sftp';
 
   console.log();
 
-  // ====== 5. 是否配置测试服务器 ======
+  // ====== 5. OBS 中转部署（可选） ======
+  console.log('━━━ 华为云 OBS 中转部署（可选）━━━');
+  const obsInput = await prompter.ask('是否启用 OBS 中转部署? (y/n): ');
+  answers.enableOBS = obsInput.toLowerCase() === 'y';
+  if (answers.enableOBS) {
+    answers.obsBucket = await prompter.ask('  OBS 桶名: ');
+    answers.obsEndpoint = await prompter.ask('  OBS Endpoint (obs.cn-north-4.myhuaweicloud.com): ') || 'obs.cn-north-4.myhuaweicloud.com';
+    answers.obsInternalEndpoint = await prompter.ask('  OBS 内网 Endpoint（可选，服务器拉取用，回车与公网相同）: ');
+    answers.obsAccessKeyId = await prompter.ask('  Access Key ID: ');
+    answers.obsSecretAccessKey = await prompter.ask('  Secret Access Key: ');
+    answers.obsUploadDir = await prompter.ask('  OBS 上传目录前缀（可选，如 deploy/my-app）: ');
+  }
+
+  console.log();
+
+  // ====== 6. 是否配置测试服务器 ======
   console.log('━━━ 测试服务器（可选）━━━');
   const testServerInput = await prompter.ask('是否配置测试服务器? (y/n): ');
   answers.configTestServer = testServerInput.toLowerCase() === 'y';
@@ -441,7 +478,7 @@ export async function runInit(options = {}) {
   }
   console.log();
 
-  // ====== 6. 钉钉通知 ======
+  // ====== 7. 钉钉通知 ======
   console.log('━━━ 钉钉通知（可选）━━━');
   const dingtalkInput = await prompter.ask('是否启用钉钉通知? (y/n): ');
   answers.enableDingtalk = dingtalkInput.toLowerCase() === 'y';
@@ -480,7 +517,13 @@ export async function runInit(options = {}) {
   console.log(`\n✅ 配置文件已保存: ${configPath}`);
 
   // 生成后提示
-  console.log(`📌 传输模式: ${answers.transferMode === 'rsync' ? 'rsync 增量同步' : answers.transferMode === 'sftp' ? 'SFTP 上传' : 'tar + zstd 管道流直传'}`);
+  const modeLabels = {
+    sftp: 'SFTP 上传',
+    rsync: 'rsync 增量同步',
+    pipe: 'tar + zstd 管道流直传',
+    obs: 'OBS 中转部署'
+  };
+  console.log(`📌 传输模式: ${modeLabels[answers.transferMode] || answers.transferMode}`);
 
   console.log('\n下一步:');
   console.log(`  1. 检查配置:    fe-build check production`);

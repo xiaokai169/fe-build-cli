@@ -73,11 +73,29 @@ export function validateConfig(config) {
         });
       }
 
+      // OBS 配置校验（可选）
+      if (envConfig.obsConfig) {
+        const obsRequired = [
+          ['bucket', 'OBS 桶名'],
+          ['endpoint', 'OBS Endpoint'],
+          ['accessKeyId', 'OBS 访问密钥 ID'],
+          ['secretAccessKey', 'OBS 访问密钥']
+        ];
+        for (const [key, label] of obsRequired) {
+          if (!envConfig.obsConfig[key]) {
+            errors.push({
+              field: `servers.${envName}.obsConfig.${key}`,
+              message: `OBS 已启用但缺少必填配置: ${label}`
+            });
+          }
+        }
+      }
+
       // 传输模式校验
-      if (envConfig.transferMode && !['pipe', 'rsync', 'sftp'].includes(envConfig.transferMode)) {
+      if (envConfig.transferMode && !['pipe', 'rsync', 'sftp', 'obs'].includes(envConfig.transferMode)) {
         errors.push({
           field: `servers.${envName}.transferMode`,
-          message: `无效的传输模式: ${envConfig.transferMode}，支持: pipe, rsync, sftp`
+          message: `无效的传输模式: ${envConfig.transferMode}，支持: pipe, rsync, sftp, obs`
         });
       }
     }
@@ -179,8 +197,19 @@ export default {
       // 需要保护的目录（部署时不会被删除）
       protectedDirs: ['webgl', 'uploads'],   // 例如：webgl、uploads 等静态资源目录
 
-      // 传输模式（可选）: 'pipe' (默认) | 'rsync' (增量同步) | 'sftp'
+      // 传输模式（可选）: 'pipe' | 'rsync' (增量同步) | 'sftp' | 'obs' (OBS中转)
       // transferMode: 'pipe',
+
+      // 华为云 OBS 中转部署（可选）
+      // 配置后优先将构建产物上传到 OBS，服务器通过内网拉取，避免公网直传不稳定
+      // obsConfig: {
+      //   bucket: 'your-bucket',                                  // OBS 桶名
+      //   endpoint: 'obs.cn-north-4.myhuaweicloud.com',           // OBS 公网 Endpoint
+      //   internalEndpoint: 'obs.cn-north-4.myhuaweicloud.com',   // 内网 Endpoint（可选，服务器拉取用）
+      //   accessKeyId: 'your-ak',                                 // 访问密钥 ID
+      //   secretAccessKey: 'your-sk',                             // 访问密钥
+      //   uploadDir: 'deploy/your-app',                            // OBS 对象前缀（可选）
+      // },
     },
 
     // 测试环境示例

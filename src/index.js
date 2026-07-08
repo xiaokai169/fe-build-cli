@@ -19,6 +19,9 @@ export {
 // SSH 客户端
 export { SSHClient } from './ssh-client.js';
 
+// OBS 客户端
+export { OBSClient } from './obs-client.js';
+
 // Git 分支管理（仅信息查询，不含合并操作）
 export {
   getCurrentBranch,
@@ -36,6 +39,8 @@ export {
   checkRsyncAvailable,
   rsyncUploadDeploy,
   pipeUploadDeploy,
+  obsUploadDeploy,
+  resolveOBSConfig,
   buildProject,
   verifyBuildOutput,
   compressBuild,
@@ -48,6 +53,7 @@ export {
   rollbackDeployment,
   getServerBackupList,
   getLocalBackupList,
+  getOBSBackupList,
   rollbackFromLocal
 } from './deploy-core.js';
 

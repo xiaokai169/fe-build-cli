@@ -106,7 +106,7 @@ fe-build-cli - 前端项目打包部署工具
   --config <路径>    指定配置文件路径
   --skip-build       跳过构建步骤
   --skip-check       跳过部署前环境预检
-  --transfer <模式>  传输模式: sftp (默认), rsync, pipe
+  --transfer <模式>  传输模式: sftp (默认), rsync, pipe, obs
   --server           回滚时使用服务器备份（默认）
   --local            回滚时使用本地备份
   --version <版本号>  回滚到指定版本
