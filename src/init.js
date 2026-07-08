@@ -194,7 +194,7 @@ export default {
 
       // 受保护目录（部署时不会被删除）
       protectedDirs: ${JSON.stringify(protectedDirs || [])},
-      // 传输模式: 'pipe' | 'rsync' | 'sftp' | 'obs'
+      // 传输模式: 'pipe' | 'rsync' | 'sftp' | 'obs' | 'git'
       transferMode: '${transferMode || 'pipe'}'`;
 
   if (enableOBS) {
@@ -212,6 +212,16 @@ export default {
     }
     content += `
       }`;
+  }
+
+  // Git Release 配置
+  if (answers.enableGitRelease) {
+    content += `,
+        // Git Release 中转部署
+        gitRelease: {
+          repo: '${answers.gitRepo || 'git@github.com:user/releases.git'}',
+          branch: '${answers.gitBranch || 'main'}'
+        }`;
   }
 
   content += `
@@ -441,8 +451,9 @@ export async function runInit(options = {}) {
   console.log('  2. rsync — rsync 增量同步（仅传变更文件，需本地和远程都安装 rsync）');
   console.log('  3. pipe  — tar + gzip 管道流（速度最快但依赖 SSH 通道稳定性）');
   console.log('  4. obs   — OBS 中转部署（上传到华为云 OBS，服务器内网拉取）');
+  console.log('  5. git   — Git 中转部署（推送到独立 Git Release 仓库，服务器拉取）');
   const transferChoice = await prompter.ask('请选择传输模式 (1): ') || '1';
-  const transferModeMap = { '1': 'sftp', '2': 'rsync', '3': 'pipe', '4': 'obs' };
+  const transferModeMap = { '1': 'sftp', '2': 'rsync', '3': 'pipe', '4': 'obs', '5': 'git' };
   answers.transferMode = transferModeMap[transferChoice] || 'sftp';
 
   console.log();
@@ -458,6 +469,17 @@ export async function runInit(options = {}) {
     answers.obsAccessKeyId = await prompter.ask('  Access Key ID: ');
     answers.obsSecretAccessKey = await prompter.ask('  Secret Access Key: ');
     answers.obsUploadDir = await prompter.ask('  OBS 上传目录前缀（可选，如 deploy/my-app）: ');
+  }
+
+  console.log();
+
+  // ====== Git Release 中转部署（可选） ======
+  console.log('━━━ Git Release 中转部署（可选）━━━');
+  const gitInput = await prompter.ask('是否启用 Git 中转部署? (y/n): ');
+  answers.enableGitRelease = gitInput.toLowerCase() === 'y';
+  if (answers.enableGitRelease) {
+    answers.gitRepo = await prompter.ask('  Git Release 仓库地址 (git@github.com:user/repo.git): ');
+    answers.gitBranch = await prompter.ask('  Git 分支 (main): ') || 'main';
   }
 
   console.log();

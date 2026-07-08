@@ -40,6 +40,7 @@ export {
   rsyncUploadDeploy,
   pipeUploadDeploy,
   obsUploadDeploy,
+  gitUploadDeploy,
   resolveOBSConfig,
   buildProject,
   verifyBuildOutput,

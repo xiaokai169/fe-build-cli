@@ -92,10 +92,10 @@ export function validateConfig(config) {
       }
 
       // 传输模式校验
-      if (envConfig.transferMode && !['pipe', 'rsync', 'sftp', 'obs'].includes(envConfig.transferMode)) {
+      if (envConfig.transferMode && !['pipe', 'rsync', 'sftp', 'obs', 'git'].includes(envConfig.transferMode)) {
         errors.push({
           field: `servers.${envName}.transferMode`,
-          message: `无效的传输模式: ${envConfig.transferMode}，支持: pipe, rsync, sftp, obs`
+          message: `无效的传输模式: ${envConfig.transferMode}，支持: pipe, rsync, sftp, obs, git`
         });
       }
     }
@@ -197,7 +197,7 @@ export default {
       // 需要保护的目录（部署时不会被删除）
       protectedDirs: ['webgl', 'uploads'],   // 例如：webgl、uploads 等静态资源目录
 
-      // 传输模式（可选）: 'pipe' | 'rsync' (增量同步) | 'sftp' | 'obs' (OBS中转)
+      // 传输模式（可选）: 'pipe' | 'rsync' (增量同步) | 'sftp' | 'obs' (OBS中转) | 'git' (Git中转)
       // transferMode: 'pipe',
 
       // 华为云 OBS 中转部署（可选）

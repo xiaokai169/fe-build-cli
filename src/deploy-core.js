@@ -1,5 +1,6 @@
 import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import zlib from 'node:zlib';
@@ -1018,6 +1019,146 @@ export async function getOBSBackupList(envConfig) {
   }
 }
 
+// ====== Git 中转部署（通过独立的 Git Release 仓库） ======
+
+/**
+ * Git 中转部署模式
+ *
+ * 流程:
+ *   1. 备份现有部署
+ *   2. 压缩本地构建产物 → dist-{version}.tar.gz
+ *   3. 推送到独立 Git Release 仓库（含 version tag）
+ *   4. SSH 服务器 git pull → 解压 → 原子替换
+ *   5. 清理本地和远程临时文件
+ *
+ * @param {object} options
+ */
+export async function gitUploadDeploy(options) {
+  const { ssh, envConfig, buildVersion, logger, skipBackup = false } = options;
+  const { repo, branch = 'main' } = envConfig.gitRelease || {};
+
+  if (!repo) {
+    throw new Error('gitRelease.repo 未配置');
+  }
+
+  // ====== A. 备份当前部署 ======
+  if (!skipBackup) {
+    await backupExistingDeployment({ ssh, envConfig, buildVersion, logger });
+  } else {
+    console.log('  (跳过备份，前面策略已创建)');
+  }
+
+  // ====== B. 压缩构建产物 ======
+  const localZipFile = `dist-${buildVersion}.tar.gz`;
+  await compressBuild(localZipFile, logger);
+
+  // ====== C. 本地 Git 推送 ======
+  console.log(`\n[步骤 5/7] 推送构建产物到 Git Release 仓库...`);
+  console.log(`  ${repo}`);
+
+  const tagName = buildVersion;
+  const zipBaseName = path.basename(localZipFile);
+  const tmpGitDir = path.join(os.tmpdir(), `fe-build-git-${buildVersion}-${Date.now()}`);
+
+  try {
+    // Clone release 仓库（浅克隆）
+    try {
+      execSync(`git clone --depth 1 --branch "${branch}" -- "${repo}" "${tmpGitDir}"`, {
+        stdio: 'pipe', timeout: 60000
+      });
+    } catch (cloneError) {
+      // 仓库为空或分支不存在，init + remote
+      console.log('  仓库可能为空或分支不存在，尝试初始化...');
+      fs.mkdirSync(tmpGitDir, { recursive: true });
+      execSync(`git init`, { cwd: tmpGitDir, stdio: 'pipe' });
+      execSync(`git remote add origin "${repo}"`, { cwd: tmpGitDir, stdio: 'pipe' });
+      try {
+        execSync(`git checkout -b "${branch}"`, { cwd: tmpGitDir, stdio: 'pipe' });
+      } catch { /* 分支可能已存在 */ }
+    }
+
+    // 复制压缩包到仓库
+    fs.copyFileSync(localZipFile, path.join(tmpGitDir, zipBaseName));
+
+    // git add + commit + tag + push
+    execSync(`git add -A`, { cwd: tmpGitDir, stdio: 'pipe' });
+    execSync(`git commit -m "deploy: ${buildVersion}"`, { cwd: tmpGitDir, stdio: 'pipe' });
+    execSync(`git tag -f "${tagName}"`, { cwd: tmpGitDir, stdio: 'pipe' });
+    execSync(`git push origin "${branch}" --tags`, { cwd: tmpGitDir, stdio: 'pipe' });
+    console.log(`✅ Git 推送完成 (tag: ${tagName})`);
+
+    // ====== D. 服务器 Git 拉取 ======
+    console.log(`\n[步骤 6/7] 服务器拉取构建产物（Git）...`);
+    const serverGitDir = `${envConfig.backupDir}/git-release`;
+    const serverGitDirEsc = shellEscape(serverGitDir);
+    const zipBaseNameEsc = shellEscape(zipBaseName);
+
+    // 检查服务器是否已有仓库
+    const checkResult = await ssh.execCommand(
+      `test -d ${serverGitDirEsc}/.git && echo 'EXISTS' || echo 'NOT_FOUND'`
+    );
+
+    if (checkResult.includes('NOT_FOUND')) {
+      console.log('  首次部署，初始化服务器 Git 仓库...');
+      await ssh.execCommand(`mkdir -p ${serverGitDirEsc}`);
+      try {
+        await ssh.execCommand(
+          `cd ${serverGitDirEsc} && git clone --depth 1 --branch "${branch}" -- "${repo}" .`
+        );
+      } catch {
+        // 空仓库 fallback
+        await ssh.execCommand(
+          `cd ${serverGitDirEsc} && git init && git remote add origin "${repo}"`
+        );
+        try {
+          await ssh.execCommand(`cd ${serverGitDirEsc} && git checkout -b "${branch}"`);
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Fetch + checkout 指定 tag
+    await ssh.execCommand(
+      `cd ${serverGitDirEsc} && git fetch origin --tags && git checkout "${tagName}"`
+    );
+    console.log(`✅ 服务器拉取完成`);
+
+    // ====== E. 解压到临时目录 ======
+    const protectedDirs = envConfig.protectedDirs || [];
+    const tmpDeployDir = `${envConfig.backupDir}/deploy-git-tmp`;
+    const tmpDirEsc = shellEscape(tmpDeployDir);
+    const deployDirEsc = shellEscape(envConfig.deployDir);
+
+    await ssh.execCommand(`rm -rf ${tmpDirEsc} && mkdir -p ${tmpDirEsc}`);
+    await ssh.execCommand(`mkdir -p ${deployDirEsc}`);
+    await ssh.execCommand(
+      `tar -xf ${serverGitDirEsc}/${zipBaseNameEsc} -C ${tmpDirEsc}`
+    );
+    console.log('✅ 解压完成');
+
+    // ====== F. 原子替换 ======
+    await swapDeployDir({ ssh, envConfig, tmpDeployDir, protectedDirs });
+    console.log('✅ 部署目录已切换（零空窗期）');
+    logger.logDeploy(envConfig.deployDir, true);
+
+    // ====== G. 清理 ======
+    try { if (fs.existsSync(localZipFile)) fs.unlinkSync(localZipFile); } catch { /* 忽略 */ }
+    try { fs.rmSync(tmpGitDir, { recursive: true, force: true }); } catch { /* 忽略 */ }
+    // 服务器只保留最新一个压缩包
+    await ssh.execCommand(
+      `cd ${serverGitDirEsc} && ls -t *.tar.gz 2>/dev/null | tail -n +2 | xargs -r rm -f`
+    );
+
+  } catch (error) {
+    // 清理
+    try { if (fs.existsSync(localZipFile)) fs.unlinkSync(localZipFile); } catch { /* 忽略 */ }
+    try { fs.rmSync(tmpGitDir, { recursive: true, force: true }); } catch { /* 忽略 */ }
+    try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-git-tmp')}`); } catch { /* 忽略 */ }
+
+    logger.logDeploy(envConfig.deployDir, false);
+    throw new Error(`Git 中转部署失败: ${error.message}`);
+  }
+}
+
 /**
  * 执行部署到服务器
  * @param {object} options - 部署选项
@@ -1057,15 +1198,20 @@ export async function deployToServer(options) {
   // 检查是否配置了 OBS（配置文件 + 环境变量合并）
   const resolvedOBSConfig = resolveOBSConfig(envConfig.obsConfig);
   const hasOBSConfig = !!(resolvedOBSConfig && resolvedOBSConfig.bucket);
-  // 将合并后的配置回写，确保后续 OBS 操作拿到完整凭证
   if (resolvedOBSConfig) {
     envConfig = { ...envConfig, obsConfig: resolvedOBSConfig };
   }
 
+  // 检查是否配置了 Git Release
+  const hasGitConfig = !!(envConfig.gitRelease && envConfig.gitRelease.repo);
+
   /** @type {string[]} */
   let strategies = [];
 
-  if (configuredMode === 'obs') {
+  if (configuredMode === 'git') {
+    strategies = ['git', 'rsync', 'sftp'];
+    console.log('\n📌 传输模式: Git 中转部署（显式指定）');
+  } else if (configuredMode === 'obs') {
     strategies = ['obs', 'rsync', 'sftp'];
     console.log('\n📌 传输模式: OBS 中转部署（显式指定）');
   } else if (configuredMode === 'pipe') {
@@ -1078,8 +1224,11 @@ export async function deployToServer(options) {
     strategies = ['sftp'];
     console.log('\n📌 传输模式: SFTP 上传');
   } else {
-    // 自动: rsync 可用则优先，否则直接 SFTP（pipe 太脆弱，默认不用）
-    if (checkRsyncAvailable()) {
+    // 自动: git > rsync > sftp
+    if (hasGitConfig) {
+      strategies = ['git', 'rsync', 'sftp'];
+      console.log('\n📌 检测到 Git Release 配置，优先使用 Git 中转部署');
+    } else if (checkRsyncAvailable()) {
       strategies = ['rsync', 'sftp'];
       console.log('\n📌 本地 rsync 可用，优先使用 rsync 增量同步');
     } else {
@@ -1096,6 +1245,20 @@ export async function deployToServer(options) {
     logger.logSSHConnect(envConfig.sshHost, true);
 
     for (const strategy of strategies) {
+      if (strategy === 'git') {
+        try {
+          await gitUploadDeploy({ ssh, envConfig, buildVersion, logger, skipBackup: backupDone });
+          finalMode = 'git';
+          break;
+        } catch (gitError) {
+          backupDone = true;
+          console.log(`\n⚠️  Git 中转失败 (${gitError.message})，降级...`);
+          logger.log('WARN', '传输降级', `Git 失败: ${gitError.message}`);
+          try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-git-tmp')}`); } catch { /* 忽略 */ }
+          continue;
+        }
+      }
+
       if (strategy === 'obs') {
         try {
           await obsUploadDeploy({ ssh, envConfig, buildVersion, logger, skipBackup: backupDone });
@@ -1183,11 +1346,13 @@ export async function deployToServer(options) {
       throw new Error('所有传输模式均失败');
     }
 
-    // 下载线上备份到本地（OBS 模式下跳过，备份已在 OBS 上）
-    if (enableBackupDownload && localBackupDir && finalMode !== 'obs') {
+    // 下载线上备份到本地（OBS/Git 模式下跳过，备份已在远端）
+    if (enableBackupDownload && localBackupDir && finalMode !== 'obs' && finalMode !== 'git') {
       await downloadBackup({ ssh, envConfig, buildVersion, localBackupDir, logger });
     } else if (finalMode === 'obs') {
       console.log('\n📌 OBS 模式：备份已存储在 OBS，跳过本地下载');
+    } else if (finalMode === 'git') {
+      console.log('\n📌 Git 模式：构建产物已存储在 Git Release 仓库，跳过本地下载');
     }
 
     await ssh.disconnect();
@@ -1203,6 +1368,7 @@ export async function deployToServer(options) {
     console.log(`服务器: ${envConfig.sshHost}`);
     console.log(`地址: ${envConfig.deployUrl}`);
     const modeNames = {
+      git: 'Git 中转部署',
       obs: 'OBS 中转部署',
       rsync: 'rsync 增量同步',
       pipe: 'tar + gzip 管道流直传',
@@ -1375,6 +1541,7 @@ export async function rollbackDeployment(options) {
 
 export default {
   pipeUploadDeploy,
+  gitUploadDeploy,
   buildProject,
   verifyBuildOutput,
   compressBuild,

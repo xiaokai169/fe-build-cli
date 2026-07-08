@@ -35,7 +35,8 @@ export interface ServerConfig {
   buildCommand?: string;
   protectedDirs?: string[];
   backupRetentionCount?: number;
-  transferMode?: 'pipe' | 'rsync' | 'sftp' | 'obs';
+  transferMode?: 'pipe' | 'rsync' | 'sftp' | 'obs' | 'git';
+  gitRelease?: { repo: string; branch?: string };
   obsConfig?: OBSConfig;
 }
 
@@ -92,10 +93,11 @@ export function getOBSBackupList(envConfig: ServerConfig): Promise<BackupFile[]>
 export function rollbackFromLocal(options: RollbackLocalOpts): Promise<string>;
 export function buildProject(envConfig: ServerConfig, buildVersion: string, logger: DeployLogger): void;
 export function verifyBuildOutput(skipBuild: boolean, logger: DeployLogger): void;
-export function compressBuild(localZipFile: string, logger: DeployLogger): void;
+export function compressBuild(localZipFile: string, logger: DeployLogger): Promise<void>;
 export function backupExistingDeployment(options: BackupOpts): Promise<void>;
 export function pipeUploadDeploy(options: PipeDeployOpts): Promise<void>;
 export function obsUploadDeploy(options: ObsDeployOpts): Promise<void>;
+export function gitUploadDeploy(options: ObsDeployOpts): Promise<void>;
 export function uploadBuild(options: UploadOpts): Promise<void>;
 export function deployAndExtract(options: ExtractOpts): Promise<void>;
 export function cleanupFiles(options: CleanupOpts): Promise<void>;
