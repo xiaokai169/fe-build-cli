@@ -27,7 +27,7 @@ export interface ServerConfig {
   protectedDirs?: string[];
   backupRetentionCount?: number;
   transferMode?: 'pipe' | 'sftp' | 'git';
-  gitRelease?: { branch?: string };
+  gitRelease?: { branch?: string; remote?: string };
 }
 
 export interface FeBuildConfig {

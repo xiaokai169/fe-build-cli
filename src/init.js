@@ -200,7 +200,12 @@ export default {
     content += `,
         // Git Release 分支部署
         gitRelease: {
-          branch: '${answers.gitBranch || 'release'}'
+          branch: '${answers.gitBranch || 'release'}'`;
+    if (answers.gitRemote) {
+      content += `,
+          remote: '${answers.gitRemote}'`;
+    }
+    content += `
         }`;
   }
 
@@ -442,6 +447,7 @@ export async function runInit(options = {}) {
   answers.enableGitRelease = gitInput.toLowerCase() === 'y';
   if (answers.enableGitRelease) {
     answers.gitBranch = await prompter.ask('  Release 分支名 (release): ') || 'release';
+    answers.gitRemote = await prompter.ask('  服务器拉取地址（可选，如 git@github.com:user/repo.git，默认用本地 origin）: ');
   }
 
   console.log();

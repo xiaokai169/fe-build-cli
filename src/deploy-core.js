@@ -547,6 +547,8 @@ export async function downloadBackup(options) {
 export async function gitUploadDeploy(options) {
   const { ssh, envConfig, buildVersion, logger, skipBackup = false } = options;
   const releaseBranch = envConfig.gitRelease?.branch || 'release';
+  // 服务器拉取用的仓库地址：优先用配置的 remote，否则用本地 origin（支持 SSH/HTTPS 混用场景）
+  const serverRemote = envConfig.gitRelease?.remote;  // 可选，不配置就用 originUrl
 
   // ====== A. 备份当前部署 ======
   if (!skipBackup) {
@@ -633,14 +635,21 @@ export async function gitUploadDeploy(options) {
       `test -d ${serverGitDirEsc}/.git && echo 'EXISTS' || echo 'NOT_FOUND'`
     );
 
+    const cloneUrl = serverRemote || originUrl;
+
     if (checkResult.includes('NOT_FOUND')) {
       console.log('  首次部署，服务器 clone 仓库...');
       await ssh.execCommand(`mkdir -p ${serverGitDirEsc}`);
       await ssh.execCommand(
-        `cd ${serverGitDirEsc} && git clone --depth 1 --single-branch --branch "${releaseBranch}" -- "${originUrl}" .`
+        `cd ${serverGitDirEsc} && git clone --depth 1 --single-branch --branch "${releaseBranch}" -- "${cloneUrl}" .`
       );
     } else {
-      // 更新到最新
+      // 更新到最新（如果配置了 serverRemote，先更新 origin URL）
+      if (serverRemote) {
+        await ssh.execCommand(
+          `cd ${serverGitDirEsc} && git remote set-url origin "${serverRemote}"`
+        );
+      }
       await ssh.execCommand(
         `cd ${serverGitDirEsc} && git fetch origin "${releaseBranch}" --depth 1 && ` +
         `git checkout "${releaseBranch}" && git reset --hard "origin/${releaseBranch}"`
