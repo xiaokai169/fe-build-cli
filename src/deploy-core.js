@@ -1114,7 +1114,8 @@ export async function gitUploadDeploy(options) {
     console.log(`✅ ${releaseBranch} 分支推送完成`);
 
     // ====== D. 切回原分支 ======
-    execSync(`git checkout "${currentBranch}"`, { stdio: 'pipe' });
+    // -f: release 是 orphan 分支，工作区还有源码文件，需强制覆盖
+    execSync(`git checkout -f "${currentBranch}"`, { stdio: 'pipe' });
     // 清理本地残留文件
     try { if (fs.existsSync(localCopy)) fs.unlinkSync(localCopy); } catch { /* 忽略 */ }
 
@@ -1171,7 +1172,7 @@ export async function gitUploadDeploy(options) {
   } catch (error) {
     // 尝试切回原分支
     if (currentBranch) {
-      try { execSync(`git checkout "${currentBranch}"`, { stdio: 'pipe' }); } catch { /* ignore */ }
+      try { execSync(`git checkout -f "${currentBranch}"`, { stdio: 'pipe' }); } catch { /* ignore */ }
     }
     // 清理本地文件
     try { if (fs.existsSync(localZipFile)) fs.unlinkSync(localZipFile); } catch { /* 忽略 */ }
