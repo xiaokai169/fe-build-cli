@@ -52,7 +52,7 @@ export function resolveOBSConfig(obsConfig) {
  * @returns {Promise<Array>} 备份文件列表
  */
 export async function getServerBackupList(ssh, envConfig) {
-  const listCommand = `ls -t ${shellEscape(envConfig.backupDir)}/${shellEscape(envConfig.backupPrefix)}*.tar.zst ${shellEscape(envConfig.backupDir)}/${shellEscape(envConfig.backupPrefix)}*.tar.gz 2>/dev/null`;
+  const listCommand = `ls -t ${shellEscape(envConfig.backupDir)}/${shellEscape(envConfig.backupPrefix)}*.tar.gz 2>/dev/null`;
   try {
     const result = await ssh.execCommand(listCommand);
     const files = result.trim().split('\n').filter(f => f.trim());
@@ -95,7 +95,7 @@ export function getLocalBackupList(localBackupDir, backupPrefix) {
 
   const files = fs.readdirSync(localBackupDir);
   const backupFiles = files.filter(f =>
-    (f.endsWith('.tar.zst') || f.endsWith('.tar.gz')) && f.startsWith(backupPrefix)
+    f.endsWith('.tar.gz') && f.startsWith(backupPrefix)
   );
 
   // 按修改时间排序（最新的在前）
@@ -206,20 +206,11 @@ export function compressBuild(localZipFile, logger) {
   console.log('\n[步骤 3/7] 压缩本地构建产物...');
 
   try {
-    // Windows 自带的 tar 不支持 -I (--use-compress-program)，改用管道方式
-    // 注意: Windows 上 execSync 使用 cmd.exe，不支持单引号（shellEscape 是 POSIX 风格）
-    // 文件名由 buildVersion 生成，不含空格/特殊字符，无需转义
-    if (isWindows()) {
-      execSync(
-        `tar -cf - -C dist . | zstd -T0 -o "${localZipFile}"`,
-        { stdio: 'inherit' }
-      );
-    } else {
-      execSync(
-        `tar -I 'zstd -T0' -cf ${shellEscape(localZipFile)} -C dist .`,
-        { stdio: 'inherit' }
-      );
-    }
+    // gzip 压缩，tar -z 在所有平台开箱即用
+    execSync(
+      `tar -czf ${shellEscape(localZipFile)} -C dist .`,
+      { stdio: 'inherit' }
+    );
     const stats = fs.statSync(localZipFile);
     logger.logCompress(stats.size, true);
     console.log('✅ 压缩完成');
@@ -238,8 +229,8 @@ export async function backupExistingDeployment(options) {
   const { ssh, envConfig, buildVersion, logger, suffix = '' } = options;
   console.log('\n[步骤] 备份现有部署...');
   const backupFile = suffix
-    ? `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}${suffix}.tar.zst`
-    : `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}.tar.zst`;
+    ? `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}${suffix}.tar.gz`
+    : `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}.tar.gz`;
 
   const mkdirCmd = `mkdir -p ${shellEscape(envConfig.backupDir)}`;
   await ssh.execCommand(mkdirCmd);
@@ -253,7 +244,7 @@ export async function backupExistingDeployment(options) {
     // 排除受保护目录，减小备份体积并避免权限问题
     const protectedDirs = envConfig.protectedDirs || [];
     const excludeArgs = protectedDirs.map(d => `--exclude=${shellEscape('./' + d)}`).join(' ');
-    const tarCmd = `tar -I zstd -cf ${shellEscape(backupFile)} ${excludeArgs} -C ${shellEscape(envConfig.deployDir)} .`;
+    const tarCmd = `tar -czf ${shellEscape(backupFile)} ${excludeArgs} -C ${shellEscape(envConfig.deployDir)} .`;
     await ssh.execCommand(tarCmd);
     logger.logBackup(backupFile, true);
     console.log('✅ 备份完成');
@@ -262,7 +253,7 @@ export async function backupExistingDeployment(options) {
     // 保留最新 N 个备份（默认1个），其余删除
     const retentionCount = envConfig.backupRetentionCount || 1;
     const cleanupCmd = `cd ${shellEscape(envConfig.backupDir)} 2>/dev/null && ` +
-      `ls -t ${shellEscape(envConfig.backupPrefix)}*.tar.zst ${shellEscape(envConfig.backupPrefix)}*.tar.gz 2>/dev/null | ` +
+      `ls -t ${shellEscape(envConfig.backupPrefix)}*.tar.gz 2>/dev/null | ` +
       `tail -n +${retentionCount + 1} | xargs -r rm -f`;
     await ssh.execCommand(cleanupCmd);
     console.log('✅ 清理旧备份完成');
@@ -310,7 +301,7 @@ async function swapDeployDir({ ssh, envConfig, tmpDeployDir, protectedDirs }) {
  * 使用 tar 管道流直传部署
  *
  * 原理:
- *   local: tar -I zstd -T0 -cf - dist/   （zstd 多线程压缩到 stdout，不写临时文件）
+ *   local: tar -czf - dist/   （gzip 压缩到 stdout，不写临时文件）
  *     | pipe
  *   remote: ssh exec tar -xf - -C /deploy/dir  （从 stdin 自动检测格式解压）
  *
@@ -351,7 +342,7 @@ export async function pipeUploadDeploy(options) {
 
   try {
     // 使用已有 SSH 连接传输，不再 spawn 第二条 ssh 连接
-    tar = spawn('tar', ['-I', 'zstd', '-T0', '-cf', '-', '-C', 'dist', '.']);
+    tar = spawn('tar', ['-czf', '-', '-C', 'dist', '.']);
 
     let bytesTransferred = 0;
     let lastUpdate = Date.now();
@@ -415,7 +406,7 @@ export async function pipeUploadDeploy(options) {
     } catch { /* 忽略 */ }
 
     // 尝试还原备份
-    const latestBackup = `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}.tar.zst`;
+    const latestBackup = `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}.tar.gz`;
     console.error('尝试还原备份...');
     try {
       await ssh.execCommand(`tar -xf ${shellEscape(latestBackup)} -C ${deployDirEsc}`);
@@ -605,7 +596,7 @@ export async function rsyncUploadDeploy(options) {
     try { await ssh.execCommand(`rm -rf ${tmpDirEsc}`); } catch { /* 忽略 */ }
 
     // 尝试还原备份
-    const latestBackup = `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}.tar.zst`;
+    const latestBackup = `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}.tar.gz`;
     console.error('尝试还原备份...');
     try {
       await ssh.execCommand(`tar -xf ${shellEscape(latestBackup)} -C ${deployDirEsc}`);
@@ -716,8 +707,8 @@ export async function downloadBackup(options) {
     fs.mkdirSync(localBackupDir, { recursive: true });
   }
 
-  const remoteBackupFile = `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}.tar.zst`;
-  const localBackupFile = path.join(localBackupDir, `${envConfig.backupPrefix}-${buildVersion}.tar.zst`);
+  const remoteBackupFile = `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}.tar.gz`;
+  const localBackupFile = path.join(localBackupDir, `${envConfig.backupPrefix}-${buildVersion}.tar.gz`);
 
   // 检查远程备份文件是否存在
   const checkCommand = `test -f ${shellEscape(remoteBackupFile)} && echo 'FILE_YES' || echo 'FILE_NO'`;
@@ -761,14 +752,14 @@ export function checkRsyncAvailable() {
 
 /**
  * OBS 模式备份现有部署
- * 服务器 tar+zstd 压缩 → curl PUT 上传到 OBS（内网）→ 清理服务器临时文件
+ * 服务器 tar+gzip 压缩 → curl PUT 上传到 OBS（内网）→ 清理服务器临时文件
  * @param {object} options
  */
 async function backupToOBS(options) {
   const { ssh, envConfig, buildVersion, obsClient, logger } = options;
   console.log('\n[步骤 4/7] 备份现有部署到 OBS...');
 
-  const backupFilename = `${envConfig.backupPrefix}-${buildVersion}.tar.zst`;
+  const backupFilename = `${envConfig.backupPrefix}-${buildVersion}.tar.gz`;
   const remoteTempDir = `${envConfig.backupDir}/.obs-backup-tmp`;
   const remoteTempFile = `${remoteTempDir}/${backupFilename}`;
   const remoteTempDirEsc = shellEscape(remoteTempDir);
@@ -788,13 +779,13 @@ async function backupToOBS(options) {
 
   try {
     // 1. 创建临时目录并在服务器上压缩现有部署
-    console.log('  压缩现有部署（服务器端 tar+zstd）...');
+    console.log('  压缩现有部署（服务器端 tar+gzip）...');
     await ssh.execCommand(`mkdir -p ${remoteTempDirEsc}`);
     const protectedDirs = envConfig.protectedDirs || [];
     const excludeArgs = protectedDirs.map(d => `--exclude=${shellEscape('./' + d)}`).join(' ');
     const tarCmd = protectedDirs.length > 0
-      ? `tar -I zstd -cf ${remoteTempFileEsc} ${excludeArgs} -C ${deployDirEsc} .`
-      : `tar -I zstd -cf ${remoteTempFileEsc} -C ${deployDirEsc} .`;
+      ? `tar -czf ${remoteTempFileEsc} ${excludeArgs} -C ${deployDirEsc} .`
+      : `tar -czf ${remoteTempFileEsc} -C ${deployDirEsc} .`;
     await ssh.execCommand(tarCmd);
     console.log('✅ 服务器端压缩完成');
 
@@ -874,7 +865,7 @@ async function obsServerDeploy(options) {
   const tmpDeployDir = `${envConfig.backupDir}/deploy-obs-tmp`;
   const tmpDirEsc = shellEscape(tmpDeployDir);
   const deployDirEsc = shellEscape(envConfig.deployDir);
-  const remoteZipPath = `${tmpDeployDir}/build.tar.zst`;
+  const remoteZipPath = `${tmpDeployDir}/build.tar.gz`;
   const remoteZipEsc = shellEscape(remoteZipPath);
 
   // 准备临时目录
@@ -929,8 +920,8 @@ export async function obsUploadDeploy(options) {
   const { ssh, envConfig, buildVersion, logger, skipBackup = false } = options;
 
   const obsClient = new OBSClient(envConfig.obsConfig);
-  const obsObjectKey = `${envConfig.backupPrefix}-${buildVersion}.tar.zst`;
-  const localZipFile = `dist-${buildVersion}.tar.zst`;
+  const obsObjectKey = `${envConfig.backupPrefix}-${buildVersion}.tar.gz`;
+  const localZipFile = `dist-${buildVersion}.tar.gz`;
 
   try {
     // ====== A. 备份现有部署到 OBS ======
@@ -993,7 +984,7 @@ export async function getOBSBackupList(envConfig) {
         file: obj.key,
         filename,
         prefix: parsed?.prefix,
-        version: parsed?.version || filename.replace(/\.tar\.zst$/, ''),
+        version: parsed?.version || filename.replace(/\.tar\.gz$/, ''),
         mtime: obj.lastModified,
         size: obj.size,
         isServer: false,
@@ -1058,7 +1049,7 @@ export async function deployToServer(options) {
     console.log('\n📌 传输模式: OBS 中转部署（显式指定）');
   } else if (configuredMode === 'pipe') {
     strategies = ['pipe', 'sftp'];
-    console.log('\n📌 传输模式: tar + zstd 管道流（显式指定）');
+    console.log('\n📌 传输模式: tar + gzip 管道流（显式指定）');
   } else if (configuredMode === 'rsync') {
     strategies = ['rsync', 'sftp'];
     console.log('\n📌 传输模式: rsync 增量同步');
@@ -1137,7 +1128,7 @@ export async function deployToServer(options) {
 
       if (strategy === 'sftp') {
         // ====== SFTP 上传（兜底）======
-        const localZipFile = `dist-${buildVersion}.tar.zst`;
+        const localZipFile = `dist-${buildVersion}.tar.gz`;
         const remoteZipFile = `${envConfig.backupDir}/${localZipFile}`;
 
         compressBuild(localZipFile, logger);
@@ -1193,7 +1184,7 @@ export async function deployToServer(options) {
     const modeNames = {
       obs: 'OBS 中转部署',
       rsync: 'rsync 增量同步',
-      pipe: 'tar + zstd 管道流直传',
+      pipe: 'tar + gzip 管道流直传',
       sftp: 'SFTP 上传'
     };
     console.log(`传输模式: ${modeNames[finalMode] || finalMode}`);
@@ -1247,10 +1238,10 @@ export async function rollbackDeployment(options) {
     let finalBackupFile = backupFile;
     if (!finalBackupFile) {
       if (specifiedVersion) {
-        finalBackupFile = `${envConfig.backupDir}/${envConfig.backupPrefix}-${specifiedVersion}.tar.zst`;
+        finalBackupFile = `${envConfig.backupDir}/${envConfig.backupPrefix}-${specifiedVersion}.tar.gz`;
         console.log(`使用指定版本: ${specifiedVersion}`);
       } else {
-        const listCommand = `ls -t ${shellEscape(envConfig.backupDir)}/${shellEscape(envConfig.backupPrefix)}*.tar.zst ${shellEscape(envConfig.backupDir)}/${shellEscape(envConfig.backupPrefix)}*.tar.gz 2>/dev/null | head -n 1`;
+        const listCommand = `ls -t ${shellEscape(envConfig.backupDir)}/${shellEscape(envConfig.backupPrefix)}*.tar.gz 2>/dev/null | head -n 1`;
         try {
           const listResult = await ssh.execCommand(listCommand);
           finalBackupFile = listResult.trim();

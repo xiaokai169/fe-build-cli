@@ -439,7 +439,7 @@ export async function runInit(options = {}) {
   console.log('\n传输模式:');
   console.log('  1. sftp  — SFTP 上传（默认推荐，稳定可靠）');
   console.log('  2. rsync — rsync 增量同步（仅传变更文件，需本地和远程都安装 rsync）');
-  console.log('  3. pipe  — tar + zstd 管道流（速度最快但依赖 SSH 通道稳定性）');
+  console.log('  3. pipe  — tar + gzip 管道流（速度最快但依赖 SSH 通道稳定性）');
   console.log('  4. obs   — OBS 中转部署（上传到华为云 OBS，服务器内网拉取）');
   const transferChoice = await prompter.ask('请选择传输模式 (1): ') || '1';
   const transferModeMap = { '1': 'sftp', '2': 'rsync', '3': 'pipe', '4': 'obs' };
@@ -520,7 +520,7 @@ export async function runInit(options = {}) {
   const modeLabels = {
     sftp: 'SFTP 上传',
     rsync: 'rsync 增量同步',
-    pipe: 'tar + zstd 管道流直传',
+    pipe: 'tar + gzip 管道流直传',
     obs: 'OBS 中转部署'
   };
   console.log(`📌 传输模式: ${modeLabels[answers.transferMode] || answers.transferMode}`);

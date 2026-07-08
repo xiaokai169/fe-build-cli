@@ -321,7 +321,7 @@ export function cleanLocalBackups(backupDir, retentionDays = 7) {
 
   // 获取所有备份文件
   const files = fs.readdirSync(backupDir);
-  const backupFiles = files.filter(f => f.endsWith('.tar.zst') || f.endsWith('.tar.gz') || f.endsWith('.tgz'));
+  const backupFiles = files.filter(f => f.endsWith('.tar.gz') || f.endsWith('.tgz'));
 
   let deletedCount = 0;
   let keptCount = 0;
