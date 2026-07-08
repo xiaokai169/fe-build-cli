@@ -2,6 +2,7 @@ import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import zlib from 'node:zlib';
 import SSHClient from './ssh-client.js';
 import { OBSClient } from './obs-client.js';
 import { DeployLogger, cleanLocalBackups } from './logger.js';
@@ -202,16 +203,35 @@ export function verifyBuildOutput(skipBuild, logger) {
  * @param {string} localZipFile - 本地压缩包路径
  * @param {DeployLogger} logger - 日志记录器
  */
-export function compressBuild(localZipFile, logger) {
+export async function compressBuild(localZipFile, logger) {
   console.log('\n[步骤 3/7] 压缩本地构建产物...');
 
   try {
-    // gzip 压缩，tar -z 在所有平台开箱即用
-    // localZipFile 由 buildVersion 生成，不含空格/特殊字符，无需转义
-    execSync(
-      `tar -czf ${localZipFile} -C dist .`,
-      { stdio: 'inherit' }
-    );
+    // tar 输出 → Node.js 内置 zlib 流式 gzip → 写入文件
+    // 不依赖外部 gzip/zstd 命令，所有平台开箱即用
+    await new Promise((resolve, reject) => {
+      const tar = spawn('tar', ['-cf', '-', '-C', 'dist', '.']);
+      const gzip = zlib.createGzip();
+      const out = fs.createWriteStream(localZipFile);
+
+      // 静默 tar 权限警告（跨平台权限差异）
+      tar.stderr.on('data', () => {});
+
+      tar.stdout.pipe(gzip).pipe(out);
+
+      let finished = false;
+      const done = (err) => {
+        if (finished) return;
+        finished = true;
+        err ? reject(err) : resolve();
+      };
+
+      out.on('finish', () => done());
+      out.on('error', done);
+      tar.on('error', done);
+      gzip.on('error', done);
+    });
+
     const stats = fs.statSync(localZipFile);
     logger.logCompress(stats.size, true);
     console.log('✅ 压缩完成');
@@ -933,7 +953,7 @@ export async function obsUploadDeploy(options) {
     }
 
     // ====== B. 压缩本地构建产物 ======
-    compressBuild(localZipFile, logger);
+    await compressBuild(localZipFile, logger);
 
     // ====== C. 上传压缩包到 OBS（公网） ======
     console.log('\n[步骤 5/7] 上传构建产物到 OBS...');
@@ -1132,7 +1152,7 @@ export async function deployToServer(options) {
         const localZipFile = `dist-${buildVersion}.tar.gz`;
         const remoteZipFile = `${envConfig.backupDir}/${localZipFile}`;
 
-        compressBuild(localZipFile, logger);
+        await compressBuild(localZipFile, logger);
         // 只有前面的策略未备份时才备份，避免重复
         if (!backupDone) {
           await backupExistingDeployment({ ssh, envConfig, buildVersion, logger, suffix: '-sftp' });
