@@ -1,6 +1,5 @@
 import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import zlib from 'node:zlib';
@@ -1019,27 +1018,31 @@ export async function getOBSBackupList(envConfig) {
   }
 }
 
-// ====== Git 中转部署（通过独立的 Git Release 仓库） ======
+// ====== Git 中转部署（通过项目的 release 分支） ======
 
 /**
- * Git 中转部署模式
+ * Git 中转部署模式（基于 orphan 分支）
+ *
+ * 在当前项目中创建独立的 release 分支，只存放构建产物压缩包。
+ * 分支与源码历史完全隔离（orphan），不污染主分支。
  *
  * 流程:
  *   1. 备份现有部署
  *   2. 压缩本地构建产物 → dist-{version}.tar.gz
- *   3. 推送到独立 Git Release 仓库（含 version tag）
- *   4. SSH 服务器 git pull → 解压 → 原子替换
- *   5. 清理本地和远程临时文件
+ *   3. 切换到 release 分支，提交压缩包并推送
+ *   4. SSH 服务器拉取 release 分支 → 解压 → 原子替换
+ *   5. 切回原分支，清理临时文件
+ *
+ * 配置:
+ *   gitRelease: {
+ *     branch: 'release'  // 发布分支名，默认 'release'
+ *   }
  *
  * @param {object} options
  */
 export async function gitUploadDeploy(options) {
   const { ssh, envConfig, buildVersion, logger, skipBackup = false } = options;
-  const { repo, branch = 'main' } = envConfig.gitRelease || {};
-
-  if (!repo) {
-    throw new Error('gitRelease.repo 未配置');
-  }
+  const releaseBranch = envConfig.gitRelease?.branch || 'release';
 
   // ====== A. 备份当前部署 ======
   if (!skipBackup) {
@@ -1052,46 +1055,71 @@ export async function gitUploadDeploy(options) {
   const localZipFile = `dist-${buildVersion}.tar.gz`;
   await compressBuild(localZipFile, logger);
 
-  // ====== C. 本地 Git 推送 ======
-  console.log(`\n[步骤 5/7] 推送构建产物到 Git Release 仓库...`);
-  console.log(`  ${repo}`);
+  // ====== C. 本地推送 release 分支 ======
+  console.log(`\n[步骤 5/7] 推送构建产物到 ${releaseBranch} 分支...`);
 
-  const tagName = buildVersion;
   const zipBaseName = path.basename(localZipFile);
-  const tmpGitDir = path.join(os.tmpdir(), `fe-build-git-${buildVersion}-${Date.now()}`);
+  let currentBranch = '';
 
   try {
-    // Clone release 仓库（浅克隆）
+    // 获取 origin URL（服务器拉取时需要）
+    let originUrl = '';
     try {
-      execSync(`git clone --depth 1 --branch "${branch}" -- "${repo}" "${tmpGitDir}"`, {
-        stdio: 'pipe', timeout: 60000
-      });
-    } catch (cloneError) {
-      // 仓库为空或分支不存在，init + remote
-      console.log('  仓库可能为空或分支不存在，尝试初始化...');
-      fs.mkdirSync(tmpGitDir, { recursive: true });
-      execSync(`git init`, { cwd: tmpGitDir, stdio: 'pipe' });
-      execSync(`git remote add origin "${repo}"`, { cwd: tmpGitDir, stdio: 'pipe' });
-      try {
-        execSync(`git checkout -b "${branch}"`, { cwd: tmpGitDir, stdio: 'pipe' });
-      } catch { /* 分支可能已存在 */ }
+      originUrl = execSync('git remote get-url origin', { encoding: 'utf-8' }).trim();
+    } catch {
+      throw new Error('无法获取 git remote origin，请确认已配置 git 远程仓库');
     }
 
-    // 复制压缩包到仓库
-    fs.copyFileSync(localZipFile, path.join(tmpGitDir, zipBaseName));
+    // 记住当前分支
+    currentBranch = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf-8' }).trim();
 
-    // git add + commit + tag + push
-    execSync(`git add -A`, { cwd: tmpGitDir, stdio: 'pipe' });
-    execSync(`git commit -m "deploy: ${buildVersion}"`, { cwd: tmpGitDir, stdio: 'pipe' });
-    execSync(`git tag -f "${tagName}"`, { cwd: tmpGitDir, stdio: 'pipe' });
-    execSync(`git push origin "${branch}" --tags`, { cwd: tmpGitDir, stdio: 'pipe' });
-    console.log(`✅ Git 推送完成 (tag: ${tagName})`);
+    // 创建或切换到 release 分支
+    let releaseExists = false;
+    try {
+      execSync(`git rev-parse --verify "${releaseBranch}"`, { stdio: 'pipe' });
+      releaseExists = true;
+    } catch {
+      releaseExists = false;
+    }
 
-    // ====== D. 服务器 Git 拉取 ======
+    if (releaseExists) {
+      execSync(`git checkout "${releaseBranch}"`, { stdio: 'pipe' });
+      // 清空分支内容
+      execSync('git rm -rf . 2>nul || git rm -rf . 2>/dev/null || true', { stdio: 'pipe' });
+    } else {
+      // 首次：创建无历史的 orphan 分支
+      execSync(`git checkout --orphan "${releaseBranch}"`, { stdio: 'pipe' });
+      execSync('git rm -rf --cached . 2>nul || git rm -rf --cached . 2>/dev/null || true', { stdio: 'pipe' });
+      console.log(`  已创建独立的 ${releaseBranch} 分支（orphan，与源码历史隔离）`);
+    }
+
+    // 复制压缩包并提交
+    const localCopy = path.join(process.cwd(), zipBaseName);
+    fs.copyFileSync(localZipFile, localCopy);
+
+    execSync(`git add -f "${zipBaseName}"`, { stdio: 'pipe' });
+    try {
+      execSync(`git commit -m "deploy: ${buildVersion}"`, { stdio: 'pipe' });
+    } catch (commitErr) {
+      // 空提交（内容没变），跳过
+      if (commitErr.message.includes('nothing to commit')) {
+        console.log('  内容无变化，跳过提交');
+      } else {
+        throw commitErr;
+      }
+    }
+    execSync(`git push origin "${releaseBranch}"`, { stdio: 'pipe' });
+    console.log(`✅ ${releaseBranch} 分支推送完成`);
+
+    // ====== D. 切回原分支 ======
+    execSync(`git checkout "${currentBranch}"`, { stdio: 'pipe' });
+    // 清理本地残留文件
+    try { if (fs.existsSync(localCopy)) fs.unlinkSync(localCopy); } catch { /* 忽略 */ }
+
+    // ====== E. 服务器 Git 拉取 ======
     console.log(`\n[步骤 6/7] 服务器拉取构建产物（Git）...`);
     const serverGitDir = `${envConfig.backupDir}/git-release`;
     const serverGitDirEsc = shellEscape(serverGitDir);
-    const zipBaseNameEsc = shellEscape(zipBaseName);
 
     // 检查服务器是否已有仓库
     const checkResult = await ssh.execCommand(
@@ -1099,34 +1127,26 @@ export async function gitUploadDeploy(options) {
     );
 
     if (checkResult.includes('NOT_FOUND')) {
-      console.log('  首次部署，初始化服务器 Git 仓库...');
+      console.log('  首次部署，服务器 clone 仓库...');
       await ssh.execCommand(`mkdir -p ${serverGitDirEsc}`);
-      try {
-        await ssh.execCommand(
-          `cd ${serverGitDirEsc} && git clone --depth 1 --branch "${branch}" -- "${repo}" .`
-        );
-      } catch {
-        // 空仓库 fallback
-        await ssh.execCommand(
-          `cd ${serverGitDirEsc} && git init && git remote add origin "${repo}"`
-        );
-        try {
-          await ssh.execCommand(`cd ${serverGitDirEsc} && git checkout -b "${branch}"`);
-        } catch { /* ignore */ }
-      }
+      await ssh.execCommand(
+        `cd ${serverGitDirEsc} && git clone --depth 1 --single-branch --branch "${releaseBranch}" -- "${originUrl}" .`
+      );
+    } else {
+      // 更新到最新
+      await ssh.execCommand(
+        `cd ${serverGitDirEsc} && git fetch origin "${releaseBranch}" --depth 1 && ` +
+        `git checkout "${releaseBranch}" && git reset --hard "origin/${releaseBranch}"`
+      );
     }
+    console.log('✅ 服务器拉取完成');
 
-    // Fetch + checkout 指定 tag
-    await ssh.execCommand(
-      `cd ${serverGitDirEsc} && git fetch origin --tags && git checkout "${tagName}"`
-    );
-    console.log(`✅ 服务器拉取完成`);
-
-    // ====== E. 解压到临时目录 ======
+    // ====== F. 解压到临时目录 ======
     const protectedDirs = envConfig.protectedDirs || [];
     const tmpDeployDir = `${envConfig.backupDir}/deploy-git-tmp`;
     const tmpDirEsc = shellEscape(tmpDeployDir);
     const deployDirEsc = shellEscape(envConfig.deployDir);
+    const zipBaseNameEsc = shellEscape(zipBaseName);
 
     await ssh.execCommand(`rm -rf ${tmpDirEsc} && mkdir -p ${tmpDirEsc}`);
     await ssh.execCommand(`mkdir -p ${deployDirEsc}`);
@@ -1135,23 +1155,24 @@ export async function gitUploadDeploy(options) {
     );
     console.log('✅ 解压完成');
 
-    // ====== F. 原子替换 ======
+    // ====== G. 原子替换 ======
     await swapDeployDir({ ssh, envConfig, tmpDeployDir, protectedDirs });
     console.log('✅ 部署目录已切换（零空窗期）');
     logger.logDeploy(envConfig.deployDir, true);
 
-    // ====== G. 清理 ======
+    // ====== H. 清理 ======
     try { if (fs.existsSync(localZipFile)) fs.unlinkSync(localZipFile); } catch { /* 忽略 */ }
-    try { fs.rmSync(tmpGitDir, { recursive: true, force: true }); } catch { /* 忽略 */ }
-    // 服务器只保留最新一个压缩包
     await ssh.execCommand(
       `cd ${serverGitDirEsc} && ls -t *.tar.gz 2>/dev/null | tail -n +2 | xargs -r rm -f`
     );
 
   } catch (error) {
-    // 清理
+    // 尝试切回原分支
+    if (currentBranch) {
+      try { execSync(`git checkout "${currentBranch}"`, { stdio: 'pipe' }); } catch { /* ignore */ }
+    }
+    // 清理本地文件
     try { if (fs.existsSync(localZipFile)) fs.unlinkSync(localZipFile); } catch { /* 忽略 */ }
-    try { fs.rmSync(tmpGitDir, { recursive: true, force: true }); } catch { /* 忽略 */ }
     try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-git-tmp')}`); } catch { /* 忽略 */ }
 
     logger.logDeploy(envConfig.deployDir, false);
@@ -1203,7 +1224,7 @@ export async function deployToServer(options) {
   }
 
   // 检查是否配置了 Git Release
-  const hasGitConfig = !!(envConfig.gitRelease && envConfig.gitRelease.repo);
+  const hasGitConfig = !!envConfig.gitRelease;
 
   /** @type {string[]} */
   let strategies = [];

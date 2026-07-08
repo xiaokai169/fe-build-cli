@@ -197,8 +197,14 @@ export default {
       // 需要保护的目录（部署时不会被删除）
       protectedDirs: ['webgl', 'uploads'],   // 例如：webgl、uploads 等静态资源目录
 
-      // 传输模式（可选）: 'pipe' | 'rsync' (增量同步) | 'sftp' | 'obs' (OBS中转) | 'git' (Git中转)
+      // 传输模式（可选）: 'pipe' | 'rsync' (增量同步) | 'sftp' | 'obs' (OBS中转) | 'git' (Git分支部署)
       // transferMode: 'pipe',
+
+      // Git Release 分支部署（可选）
+      // 在同一仓库创建独立 release 分支，存放构建产物压缩包
+      // gitRelease: {
+      //   branch: 'release'    // 分支名，默认 'release'
+      // },
 
       // 华为云 OBS 中转部署（可选）
       // 配置后优先将构建产物上传到 OBS，服务器通过内网拉取，避免公网直传不稳定
