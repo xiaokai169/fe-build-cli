@@ -207,8 +207,9 @@ export function compressBuild(localZipFile, logger) {
 
   try {
     // gzip 压缩，tar -z 在所有平台开箱即用
+    // localZipFile 由 buildVersion 生成，不含空格/特殊字符，无需转义
     execSync(
-      `tar -czf ${shellEscape(localZipFile)} -C dist .`,
+      `tar -czf ${localZipFile} -C dist .`,
       { stdio: 'inherit' }
     );
     const stats = fs.statSync(localZipFile);
