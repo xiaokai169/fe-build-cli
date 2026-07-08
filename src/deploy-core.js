@@ -1099,7 +1099,8 @@ export async function gitUploadDeploy(options) {
 
     execSync(`git add -f "${zipBaseName}"`, { stdio: 'pipe' });
     try {
-      execSync(`git commit -m "deploy: ${buildVersion}"`, { stdio: 'pipe' });
+      console.log(`  git commit -m "deploy: ${buildVersion}"`);
+      execSync(`git commit -m "deploy: ${buildVersion}"`, { stdio: 'inherit' });
     } catch (commitErr) {
       // 空提交（内容没变），跳过
       if (commitErr.message.includes('nothing to commit')) {
@@ -1108,7 +1109,8 @@ export async function gitUploadDeploy(options) {
         throw commitErr;
       }
     }
-    execSync(`git push origin "${releaseBranch}"`, { stdio: 'pipe' });
+    console.log(`  git push origin ${releaseBranch} ...`);
+    execSync(`git push origin "${releaseBranch}"`, { stdio: 'inherit' });
     console.log(`✅ ${releaseBranch} 分支推送完成`);
 
     // ====== D. 切回原分支 ======
