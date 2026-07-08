@@ -587,7 +587,7 @@ export async function gitUploadDeploy(options) {
     }
 
     if (releaseExists) {
-      execSync(`git checkout "${releaseBranch}"`, { stdio: 'pipe' });
+      execSync(`git checkout -f "${releaseBranch}"`, { stdio: 'pipe' });
       // 清空分支内容
       execSync('git rm -rf . 2>nul || git rm -rf . 2>/dev/null || true', { stdio: 'pipe' });
     } else {
