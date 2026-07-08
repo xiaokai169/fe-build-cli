@@ -65,8 +65,8 @@ export async function deployCommand(config) {
   const transferMode = transferIndex !== -1 && args[transferIndex + 1]
     ? args[transferIndex + 1]
     : undefined;
-  if (transferMode && !['pipe', 'rsync', 'sftp', 'obs', 'git'].includes(transferMode)) {
-    console.error(`⚠️  无效的传输模式: ${transferMode}，支持: pipe, rsync, sftp, obs, git`);
+  if (transferMode && !['pipe', 'sftp', 'obs', 'git'].includes(transferMode)) {
+    console.error(`⚠️  无效的传输模式: ${transferMode}，支持: pipe, sftp, obs, git`);
     console.error('将使用自动检测模式');
   }
 
@@ -217,7 +217,7 @@ export async function deployCommand(config) {
         logger,
         localBackupDir,
         enableBackupDownload,
-        transferMode: ['pipe', 'rsync', 'sftp', 'obs', 'git'].includes(transferMode) ? transferMode : undefined
+        transferMode: ['pipe', 'sftp', 'obs', 'git'].includes(transferMode) ? transferMode : undefined
       });
 
       logger.end('success');

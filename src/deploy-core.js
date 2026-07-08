@@ -439,201 +439,6 @@ export async function pipeUploadDeploy(options) {
   }
 }
 
-/**
- * 使用 rsync over SSH 增量同步部署
- *
- * 流程:
- *   1. 备份现有部署（复用 backupExistingDeployment）
- *   2. 创建远程临时目录 backupDir/deploy-rsync-tmp
- *   3. rsync dist/ → 远程临时目录（增量同步，只传差异文件）
- *   4. 原子交换 swapDeployDir() → deployDir
- *
- * rsync 通过 spawn 独立进程运行，自行管理 SSH 连接（RSYNC_RSH 环境变量）。
- * 原有的 SSHClient 连接仍用于备份、目录准备和原子交换。
- *
- * @param {object} options
- * @param {SSHClient} options.ssh
- * @param {object} options.envConfig
- * @param {string} options.buildVersion
- * @param {DeployLogger} options.logger
- */
-export async function rsyncUploadDeploy(options) {
-  const { ssh, envConfig, buildVersion, logger, skipBackup = false } = options;
-
-  // ====== A. 备份当前部署 ======
-  if (!skipBackup) {
-    await backupExistingDeployment({ ssh, envConfig, buildVersion, logger });
-  } else {
-    console.log('  (跳过备份，前面策略已创建)');
-  }
-
-  // ====== B. 准备临时目录 ======
-  console.log('\n[步骤 3/7] 准备临时部署目录...');
-
-  const protectedDirs = envConfig.protectedDirs || [];
-  const tmpDeployDir = `${envConfig.backupDir}/deploy-rsync-tmp`;
-  const tmpDirEsc = shellEscape(tmpDeployDir);
-  const deployDirEsc = shellEscape(envConfig.deployDir);
-
-  await ssh.execCommand(`rm -rf ${tmpDirEsc} && mkdir -p ${tmpDirEsc}`);
-  await ssh.execCommand(`mkdir -p ${deployDirEsc}`);
-  console.log('✅ 临时部署目录已就绪');
-
-  // ====== C. rsync 增量同步 ======
-  console.log(`\n[步骤 4/7] rsync 增量同步 dist/ → ${envConfig.sshHost}...`);
-  console.log('  (rsync: 仅传输变更文件，重试 1 次 + 超时保护)');
-
-  const keyPath = expandTilde(envConfig.sshKeyPath).replace(/\\/g, '/');
-  const sshPort = envConfig.sshPort || 22;
-  const remoteTarget = `${envConfig.sshUser}@${envConfig.sshHost}:${tmpDeployDir}`;
-
-  // 构建 SSH 命令（作为 rsync -e 的参数）
-  // -q + LogLevel=QUIET 强制静默所有 SSH 输出，防止 MOTD/banner/.bashrc 混入 rsync 协议流
-  const sshCmd = `ssh -q -i ${keyPath} -p ${sshPort} -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o BatchMode=yes -o LogLevel=QUIET`;
-
-  const rsyncArgs = [
-    '-az',                  // 归档 + 压缩
-    '--delete',             // 删除远程多余文件
-    '--no-perms',
-    '--no-owner',
-    '--no-group',
-    '--info=progress2',     // 总进度（非每文件）
-    '--human-readable',
-    '--timeout=120',        // rsync 内置超时：120s 无传输则退出
-    '-e', sshCmd,           // SSH 命令（数组方式避免引用嵌套）
-    './dist/',              // 注意尾部 / = 复制内容而非目录本身
-    `${remoteTarget}/`
-  ];
-
-  // 排除受保护目录
-  for (const dir of protectedDirs) {
-    rsyncArgs.push('--exclude', dir);
-  }
-
-  /**
-   * 执行一次 rsync 同步
-   * @returns {Promise<number>} 耗时（秒）
-   */
-  const runRsyncOnce = () => new Promise((resolve, reject) => {
-    const startTime = Date.now();
-    let rsyncProc = null;
-
-    // 总超时定时器：5 分钟无结果强制 kill（rsync --timeout 只管 I/O 超时）
-    const hardTimeout = setTimeout(() => {
-      if (rsyncProc && !rsyncProc.killed) {
-        try { rsyncProc.kill('SIGTERM'); } catch { /* 忽略 */ }
-      }
-    }, 300000); // 5 分钟硬超时
-
-    try {
-      // Windows 上 rsync 是 MSYS2/Git Bash 程序，必须通过 shell 调用才能正确初始化
-      rsyncProc = spawn('rsync', rsyncArgs, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        shell: isWindows()
-      });
-    } catch (err) {
-      clearTimeout(hardTimeout);
-      reject(err);
-      return;
-    }
-
-    let lastProgress = Date.now();
-
-    // 解析 --info=progress2 输出
-    const progressRegex = /^\s*([\d,]+)\s+(\d+)%\s+([\d.]+[A-Za-z\/]+)\s/;
-
-    rsyncProc.stdout.on('data', (data) => {
-      const lines = data.toString().split('\n');
-      for (const line of lines) {
-        const match = line.match(progressRegex);
-        if (match) {
-          const now = Date.now();
-          if (now - lastProgress > 200) {
-            lastProgress = now;
-            const bytes = parseInt(match[1].replace(/,/g, ''), 10);
-            const pct = parseInt(match[2], 10);
-            const speed = match[3];
-            const barW = 20;
-            const filled = Math.round((pct / 100) * barW);
-            const bar = '█'.repeat(filled) + '░'.repeat(barW - filled);
-            const elapsed = (now - startTime) / 1000;
-            process.stdout.write(
-              `\rrsync [${bar}] ${pct}%  ${formatBytes(bytes)}  ${speed}  ${elapsed.toFixed(0)}s`
-            );
-          }
-        }
-      }
-    });
-
-    let stderrBuf = '';
-    rsyncProc.stderr.on('data', (data) => { stderrBuf += data.toString(); });
-
-    rsyncProc.on('error', (err) => {
-      clearTimeout(hardTimeout);
-      reject(err);
-    });
-
-    rsyncProc.on('close', (code) => {
-      clearTimeout(hardTimeout);
-      const duration = Math.round((Date.now() - startTime) / 1000);
-      if (code === 0) {
-        resolve(duration);
-      } else {
-        const errDetail = stderrBuf.trim() ? ` — ${stderrBuf.trim().split('\n').pop()}` : '';
-        reject(new Error(`rsync 退出码: ${code}${errDetail}`));
-      }
-    });
-  });
-
-  // 重试循环（最多 2 次）
-  let lastError = null;
-  let rsyncSuccess = false;
-
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    if (attempt > 1) {
-      console.log(`\n🔄 rsync 重试 (${attempt}/2)...`);
-      // 重试前等待 2 秒
-      await new Promise(r => setTimeout(r, 2000));
-    }
-
-    try {
-      const duration = await runRsyncOnce();
-      process.stdout.write(`\r✅ rsync 同步完成 (${duration}s)                    \n`);
-      logger.logUpload('dist/', tmpDeployDir, 0, duration, true);
-      rsyncSuccess = true;
-      break;
-    } catch (error) {
-      lastError = error;
-      if (attempt < 2) {
-        console.error(`\n⚠️  rsync 失败 (${error.message})，准备重试...`);
-      }
-    }
-  }
-
-  if (!rsyncSuccess) {
-    logger.logUpload('dist/', tmpDeployDir, 0, 0, false);
-
-    console.error('\n❌ rsync 传输失败，清理临时目录...');
-    try { await ssh.execCommand(`rm -rf ${tmpDirEsc}`); } catch { /* 忽略 */ }
-
-    // 尝试还原备份
-    const latestBackup = `${envConfig.backupDir}/${envConfig.backupPrefix}-${buildVersion}.tar.gz`;
-    console.error('尝试还原备份...');
-    try {
-      await ssh.execCommand(`tar -xf ${shellEscape(latestBackup)} -C ${deployDirEsc}`);
-      console.log('✅ 已还原备份');
-    } catch {
-      console.error('⚠️  还原备份也失败了，请手动检查');
-    }
-    throw new Error(`rsync 传输失败: ${lastError.message}`);
-  }
-
-  // ====== D. 原子交换 ======
-  console.log('\n[步骤 5/7] 原子替换部署目录...');
-  await swapDeployDir({ ssh, envConfig, tmpDeployDir, protectedDirs });
-  console.log('✅ 部署目录已切换（零空窗期）');
-  logger.logDeploy(envConfig.deployDir, true);
-}
 
 /**
  * 上传构建产物（SFTP 降级模式）
@@ -753,19 +558,6 @@ export async function downloadBackup(options) {
     logger.logBackup(remoteBackupFile, false, true);
     console.error('❌ 下载备份失败:', error.message);
     return null;
-  }
-}
-
-/**
- * 检测本地是否安装了 rsync 二进制文件
- * @returns {boolean}
- */
-export function checkRsyncAvailable() {
-  try {
-    execSync('rsync --version', { stdio: 'pipe', encoding: 'utf-8' });
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -1233,28 +1025,22 @@ export async function deployToServer(options) {
   let strategies = [];
 
   if (configuredMode === 'git') {
-    strategies = ['git', 'rsync', 'sftp'];
+    strategies = ['git', 'sftp'];
     console.log('\n📌 传输模式: Git 中转部署（显式指定）');
   } else if (configuredMode === 'obs') {
-    strategies = ['obs', 'rsync', 'sftp'];
+    strategies = ['obs', 'sftp'];
     console.log('\n📌 传输模式: OBS 中转部署（显式指定）');
   } else if (configuredMode === 'pipe') {
     strategies = ['pipe', 'sftp'];
     console.log('\n📌 传输模式: tar + gzip 管道流（显式指定）');
-  } else if (configuredMode === 'rsync') {
-    strategies = ['rsync', 'sftp'];
-    console.log('\n📌 传输模式: rsync 增量同步');
   } else if (configuredMode === 'sftp') {
     strategies = ['sftp'];
     console.log('\n📌 传输模式: SFTP 上传');
   } else {
-    // 自动: git > rsync > sftp
+    // 自动: git > sftp
     if (hasGitConfig) {
-      strategies = ['git', 'rsync', 'sftp'];
+      strategies = ['git', 'sftp'];
       console.log('\n📌 检测到 Git Release 配置，优先使用 Git 中转部署');
-    } else if (checkRsyncAvailable()) {
-      strategies = ['rsync', 'sftp'];
-      console.log('\n📌 本地 rsync 可用，优先使用 rsync 增量同步');
     } else {
       strategies = ['sftp'];
       console.log('\n📌 使用 SFTP 上传模式（稳定可靠）');
@@ -1293,29 +1079,6 @@ export async function deployToServer(options) {
           console.log(`\n⚠️  OBS 中转失败 (${obsError.message})，降级...`);
           logger.log('WARN', '传输降级', `OBS 失败: ${obsError.message}`);
           try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-obs-tmp')}`); } catch { /* 忽略 */ }
-          continue;
-        }
-      }
-
-      if (strategy === 'rsync') {
-        try {
-          // 检查远程 rsync 是否可用
-          const remoteCheck = await ssh.execCommand(
-            'command -v rsync 2>/dev/null && echo "AVAILABLE" || echo "NOT_FOUND"'
-          );
-          if (remoteCheck.includes('NOT_FOUND')) {
-            console.log('\n⚠️  服务器未安装 rsync，跳过');
-            logger.log('WARN', '传输降级', '服务器未安装 rsync');
-            continue;
-          }
-          await rsyncUploadDeploy({ ssh, envConfig, buildVersion, logger, skipBackup: backupDone });
-          finalMode = 'rsync';
-          break;
-        } catch (rsyncError) {
-          backupDone = true;
-          console.log(`\n⚠️  rsync 失败 (${rsyncError.message})，降级...`);
-          logger.log('WARN', '传输降级', `rsync 失败: ${rsyncError.message}`);
-          try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-rsync-tmp')}`); } catch { /* 忽略 */ }
           continue;
         }
       }
@@ -1394,7 +1157,6 @@ export async function deployToServer(options) {
     const modeNames = {
       git: 'Git 中转部署',
       obs: 'OBS 中转部署',
-      rsync: 'rsync 增量同步',
       pipe: 'tar + gzip 管道流直传',
       sftp: 'SFTP 上传'
     };

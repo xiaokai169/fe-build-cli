@@ -49,7 +49,7 @@ export async function runPreflightChecks(options) {
   results.push(checkGitAvailable());
   results.push(checkGitStatus());
   results.push(checkLocalSsh());
-  results.push(checkLocalRsync());
+
   results.push(...checkDiskSpace(quick));
 
   // ====== 远程环境检查 ======
@@ -67,7 +67,8 @@ export async function runPreflightChecks(options) {
       const checks = [
         checkRemoteDiskSpace(ssh, envConfig),
         checkRemoteDirPermissions(ssh, envConfig),
-        checkRemoteRsync(ssh)
+
+
       ];
 
       // 检查 OBS 连接（如果配置了 OBS）
@@ -311,27 +312,6 @@ function checkLocalSsh() {
 }
 
 /**
- * 检查本地 rsync 是否可用
- */
-function checkLocalRsync() {
-  try {
-    const version = execSync('rsync --version', { encoding: 'utf-8' }).trim();
-    const firstLine = version.split('\n')[0];
-    return {
-      name: '本地 rsync',
-      status: 'pass',
-      message: `${firstLine}（将优先使用增量同步）`
-    };
-  } catch {
-    return {
-      name: '本地 rsync',
-      status: 'warn',
-      message: 'rsync 不可用（将使用 tar 管道流传输）'
-    };
-  }
-}
-
-/**
  * 检查 OBS 连接
  */
 async function checkOBSConnection(obsConfig) {
@@ -349,35 +329,6 @@ async function checkOBSConnection(obsConfig) {
       name: 'OBS 连接',
       status: 'warn',
       message: `连接失败: ${error.message}（不影响非 OBS 部署）`
-    };
-  }
-}
-
-/**
- * 检查远程 rsync 是否可用
- */
-async function checkRemoteRsync(ssh) {
-  try {
-    const result = await ssh.execCommand(
-      'command -v rsync 2>/dev/null && rsync --version 2>/dev/null | head -1 || echo "NOT_FOUND"'
-    );
-    if (result.includes('NOT_FOUND')) {
-      return {
-        name: '服务器 rsync',
-        status: 'warn',
-        message: '未安装 rsync（rsync 模式不可用）'
-      };
-    }
-    return {
-      name: '服务器 rsync',
-      status: 'pass',
-      message: result.trim()
-    };
-  } catch {
-    return {
-      name: '服务器 rsync',
-      status: 'warn',
-      message: '无法检测（rsync 模式可能不可用）'
     };
   }
 }

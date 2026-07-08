@@ -35,7 +35,7 @@ export interface ServerConfig {
   buildCommand?: string;
   protectedDirs?: string[];
   backupRetentionCount?: number;
-  transferMode?: 'pipe' | 'rsync' | 'sftp' | 'obs' | 'git';
+  transferMode?: 'pipe' | 'sftp' | 'obs' | 'git';
   gitRelease?: { branch?: string };
   obsConfig?: OBSConfig;
 }

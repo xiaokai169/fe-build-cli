@@ -194,7 +194,7 @@ export default {
 
       // 受保护目录（部署时不会被删除）
       protectedDirs: ${JSON.stringify(protectedDirs || [])},
-      // 传输模式: 'pipe' | 'rsync' | 'sftp' | 'obs' | 'git'
+      // 传输模式: 'pipe' | 'sftp' | 'obs' | 'git'
       transferMode: '${transferMode || 'pipe'}'`;
 
   if (enableOBS) {
@@ -447,12 +447,11 @@ export async function runInit(options = {}) {
   // 传输模式选择
   console.log('\n传输模式:');
   console.log('  1. sftp  — SFTP 上传（默认推荐，稳定可靠）');
-  console.log('  2. rsync — rsync 增量同步（仅传变更文件，需本地和远程都安装 rsync）');
-  console.log('  3. pipe  — tar + gzip 管道流（速度最快但依赖 SSH 通道稳定性）');
-  console.log('  4. obs   — OBS 中转部署（上传到华为云 OBS，服务器内网拉取）');
-  console.log('  5. git   — Git 中转部署（推送到 release 分支，服务器拉取）');
+  console.log('  2. pipe  — tar + gzip 管道流（速度最快但依赖 SSH 通道稳定性）');
+  console.log('  3. obs   — OBS 中转部署（上传到华为云 OBS，服务器内网拉取）');
+  console.log('  4. git   — Git 中转部署（推送到 release 分支，服务器拉取）');
   const transferChoice = await prompter.ask('请选择传输模式 (1): ') || '1';
-  const transferModeMap = { '1': 'sftp', '2': 'rsync', '3': 'pipe', '4': 'obs', '5': 'git' };
+  const transferModeMap = { '1': 'sftp', '2': 'pipe', '3': 'obs', '4': 'git' };
   answers.transferMode = transferModeMap[transferChoice] || 'sftp';
 
   console.log();
@@ -539,7 +538,6 @@ export async function runInit(options = {}) {
   // 生成后提示
   const modeLabels = {
     sftp: 'SFTP 上传',
-    rsync: 'rsync 增量同步',
     pipe: 'tar + gzip 管道流直传',
     obs: 'OBS 中转部署'
   };
