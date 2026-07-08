@@ -553,7 +553,8 @@ export async function rsyncUploadDeploy(options) {
       }
     });
 
-    rsyncProc.stderr.on('data', () => { /* 静默权限警告 */ });
+    let stderrBuf = '';
+    rsyncProc.stderr.on('data', (data) => { stderrBuf += data.toString(); });
 
     rsyncProc.on('error', (err) => {
       clearTimeout(hardTimeout);
@@ -566,7 +567,8 @@ export async function rsyncUploadDeploy(options) {
       if (code === 0) {
         resolve(duration);
       } else {
-        reject(new Error(`rsync 退出码: ${code}`));
+        const errDetail = stderrBuf.trim() ? ` — ${stderrBuf.trim().split('\n').pop()}` : '';
+        reject(new Error(`rsync 退出码: ${code}${errDetail}`));
       }
     });
   });
