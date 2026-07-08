@@ -187,22 +187,6 @@ export class DeployLogger {
   }
 
   /**
-   * 记录 OBS 操作
-   * @param {string} operation - 操作类型（上传/下载/备份/清理）
-   * @param {string} bucket - 桶名
-   * @param {string} objectKey - 对象键
-   * @param {boolean} success - 是否成功
-   */
-  logOBS(operation, bucket, objectKey, success) {
-    this.log(
-      success ? 'SUCCESS' : 'ERROR',
-      `OBS ${operation}`,
-      `桶: ${bucket}, 对象: ${objectKey}, ${success ? '成功' : '失败'}`,
-      { bucket, objectKey }
-    );
-  }
-
-  /**
    * 记录钉钉通知
    */
   logDingTalk(success, message = '') {

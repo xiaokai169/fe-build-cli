@@ -135,9 +135,7 @@ function generateConfigContent(answers, projectInfo) {
     productionBuildMode,
     enableDingtalk, dingtalkWebhook, dingtalkKeyword,
     enableBackupDownload, localBackupDir,
-    protectedDirs, transferMode,
-    enableOBS, obsBucket, obsEndpoint, obsInternalEndpoint,
-    obsAccessKeyId, obsSecretAccessKey, obsUploadDir
+    protectedDirs, transferMode
   } = answers;
 
   let content = `/**
@@ -194,25 +192,8 @@ export default {
 
       // 受保护目录（部署时不会被删除）
       protectedDirs: ${JSON.stringify(protectedDirs || [])},
-      // 传输模式: 'pipe' | 'sftp' | 'obs' | 'git'
+      // 传输模式: 'pipe' | 'sftp' | 'git'
       transferMode: '${transferMode || 'pipe'}'`;
-
-  if (enableOBS) {
-    content += `,
-      // 华为云 OBS 中转部署配置
-      obsConfig: {
-        bucket: '${obsBucket || 'your-bucket'}',
-        endpoint: '${obsEndpoint || 'obs.cn-north-4.myhuaweicloud.com'}',
-        internalEndpoint: '${obsInternalEndpoint || obsEndpoint || 'obs.cn-north-4.myhuaweicloud.com'}',
-        accessKeyId: '${obsAccessKeyId || 'your-ak'}',
-        secretAccessKey: '${obsSecretAccessKey || 'your-sk'}'`;
-    if (obsUploadDir) {
-      content += `,
-        uploadDir: '${obsUploadDir}'`;
-    }
-    content += `
-      }`;
-  }
 
   // Git Release 配置
   if (answers.enableGitRelease) {
@@ -448,30 +429,14 @@ export async function runInit(options = {}) {
   console.log('\n传输模式:');
   console.log('  1. sftp  — SFTP 上传（默认推荐，稳定可靠）');
   console.log('  2. pipe  — tar + gzip 管道流（速度最快但依赖 SSH 通道稳定性）');
-  console.log('  3. obs   — OBS 中转部署（上传到华为云 OBS，服务器内网拉取）');
-  console.log('  4. git   — Git 中转部署（推送到 release 分支，服务器拉取）');
+  console.log('  3. git   — Git 中转部署（推送到 release 分支，服务器拉取）');
   const transferChoice = await prompter.ask('请选择传输模式 (1): ') || '1';
-  const transferModeMap = { '1': 'sftp', '2': 'pipe', '3': 'obs', '4': 'git' };
+  const transferModeMap = { '1': 'sftp', '2': 'pipe', '3': 'git' };
   answers.transferMode = transferModeMap[transferChoice] || 'sftp';
 
   console.log();
 
-  // ====== 5. OBS 中转部署（可选） ======
-  console.log('━━━ 华为云 OBS 中转部署（可选）━━━');
-  const obsInput = await prompter.ask('是否启用 OBS 中转部署? (y/n): ');
-  answers.enableOBS = obsInput.toLowerCase() === 'y';
-  if (answers.enableOBS) {
-    answers.obsBucket = await prompter.ask('  OBS 桶名: ');
-    answers.obsEndpoint = await prompter.ask('  OBS Endpoint (obs.cn-north-4.myhuaweicloud.com): ') || 'obs.cn-north-4.myhuaweicloud.com';
-    answers.obsInternalEndpoint = await prompter.ask('  OBS 内网 Endpoint（可选，服务器拉取用，回车与公网相同）: ');
-    answers.obsAccessKeyId = await prompter.ask('  Access Key ID: ');
-    answers.obsSecretAccessKey = await prompter.ask('  Secret Access Key: ');
-    answers.obsUploadDir = await prompter.ask('  OBS 上传目录前缀（可选，如 deploy/my-app）: ');
-  }
-
-  console.log();
-
-  // ====== Git Release 中转部署（可选） ======
+  // ====== 5. Git Release 中转部署（可选） ======
   console.log('━━━ Git Release 中转部署（可选）━━━');
   const gitInput = await prompter.ask('是否启用 Git 中转部署? (y/n): ');
   answers.enableGitRelease = gitInput.toLowerCase() === 'y';
@@ -539,7 +504,6 @@ export async function runInit(options = {}) {
   const modeLabels = {
     sftp: 'SFTP 上传',
     pipe: 'tar + gzip 管道流直传',
-    obs: 'OBS 中转部署'
   };
   console.log(`📌 传输模式: ${modeLabels[answers.transferMode] || answers.transferMode}`);
 

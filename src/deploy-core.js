@@ -4,47 +4,8 @@ import path from 'node:path';
 import process from 'node:process';
 import zlib from 'node:zlib';
 import SSHClient from './ssh-client.js';
-import { OBSClient } from './obs-client.js';
 import { DeployLogger, cleanLocalBackups } from './logger.js';
 import { formatBytes, shellEscape, parseBackupFilename, expandTilde, isWindows } from './utils.js';
-
-/**
- * 解析 OBS 配置，用环境变量补齐缺失的敏感字段
- *
- * 支持的环境变量:
- *   FE_BUILD_OBS_ACCESS_KEY_ID     — OBS Access Key ID
- *   FE_BUILD_OBS_SECRET_ACCESS_KEY — OBS Secret Access Key
- *
- * 使用场景: fe-build.config.js 中只配置非敏感的 bucket/endpoint，
- * AK/SK 通过环境变量注入，避免敏感信息提交到 Git。
- *
- * @param {object|undefined} obsConfig - 配置文件中的 obsConfig
- * @returns {object|null} 合并后的完整 OBS 配置，或 null
- */
-export function resolveOBSConfig(obsConfig) {
-  if (!obsConfig || !obsConfig.bucket) {
-    // 如果完全没有 obsConfig 但环境变量中有关键信息，也尝试构建
-    const envBucket = process.env.FE_BUILD_OBS_BUCKET;
-    const envEndpoint = process.env.FE_BUILD_OBS_ENDPOINT;
-    if (!envBucket && !envEndpoint) return null;
-
-    return {
-      bucket: envBucket || '',
-      endpoint: envEndpoint || '',
-      internalEndpoint: process.env.FE_BUILD_OBS_INTERNAL_ENDPOINT || envEndpoint || '',
-      accessKeyId: process.env.FE_BUILD_OBS_ACCESS_KEY_ID || '',
-      secretAccessKey: process.env.FE_BUILD_OBS_SECRET_ACCESS_KEY || '',
-      uploadDir: process.env.FE_BUILD_OBS_UPLOAD_DIR || ''
-    };
-  }
-
-  // 以配置文件为主，环境变量兜底补齐 AK/SK
-  return {
-    ...obsConfig,
-    accessKeyId: obsConfig.accessKeyId || process.env.FE_BUILD_OBS_ACCESS_KEY_ID || '',
-    secretAccessKey: obsConfig.secretAccessKey || process.env.FE_BUILD_OBS_SECRET_ACCESS_KEY || ''
-  };
-}
 
 /**
  * 获取服务器备份列表
@@ -561,255 +522,6 @@ export async function downloadBackup(options) {
   }
 }
 
-// ====== OBS 中转部署（华为云对象存储） ======
-
-/**
- * OBS 模式备份现有部署
- * 服务器 tar+gzip 压缩 → curl PUT 上传到 OBS（内网）→ 清理服务器临时文件
- * @param {object} options
- */
-async function backupToOBS(options) {
-  const { ssh, envConfig, buildVersion, obsClient, logger } = options;
-  console.log('\n[步骤 4/7] 备份现有部署到 OBS...');
-
-  const backupFilename = `${envConfig.backupPrefix}-${buildVersion}.tar.gz`;
-  const remoteTempDir = `${envConfig.backupDir}/.obs-backup-tmp`;
-  const remoteTempFile = `${remoteTempDir}/${backupFilename}`;
-  const remoteTempDirEsc = shellEscape(remoteTempDir);
-  const remoteTempFileEsc = shellEscape(remoteTempFile);
-  const deployDirEsc = shellEscape(envConfig.deployDir);
-
-  // 检查部署目录是否有文件
-  const checkResult = await ssh.execCommand(
-    `[ -d ${deployDirEsc} ] && [ "$(ls -A ${deployDirEsc} 2>/dev/null)" ] && echo 'has_files' || echo 'empty'`
-  );
-
-  if (!checkResult.includes('has_files')) {
-    logger.log('INFO', 'OBS 备份', '部署目录为空或不存在，跳过备份');
-    console.log('部署目录为空或不存在，跳过 OBS 备份');
-    return;
-  }
-
-  try {
-    // 1. 创建临时目录并在服务器上压缩现有部署
-    console.log('  压缩现有部署（服务器端 tar+gzip）...');
-    await ssh.execCommand(`mkdir -p ${remoteTempDirEsc}`);
-    const protectedDirs = envConfig.protectedDirs || [];
-    const excludeArgs = protectedDirs.map(d => `--exclude=${shellEscape('./' + d)}`).join(' ');
-    const tarCmd = protectedDirs.length > 0
-      ? `tar -czf ${remoteTempFileEsc} ${excludeArgs} -C ${deployDirEsc} .`
-      : `tar -czf ${remoteTempFileEsc} -C ${deployDirEsc} .`;
-    await ssh.execCommand(tarCmd);
-    console.log('✅ 服务器端压缩完成');
-
-    // 2. 生成 OBS 预签名上传 URL（使用内网 endpoint）
-    console.log('  生成 OBS 预签名上传 URL（内网）...');
-    const presignedUploadUrl = obsClient.getSignedUrl(backupFilename, 3600, 'PUT', true);
-
-    // 3. SSH 服务器用 curl 上传备份到 OBS（内网）
-    console.log('  服务器上传备份到 OBS（内网）...');
-    const startTime = Date.now();
-    await ssh.execCommand(
-      `curl -s -X PUT -T ${remoteTempFileEsc} "${presignedUploadUrl}"`
-    );
-    const duration = Math.round((Date.now() - startTime) / 1000);
-    console.log(`✅ OBS 备份上传完成 (${duration}s)`);
-
-    logger.logBackup(`obs://${obsClient.bucket}/${backupFilename}`, true);
-
-    // 4. 清理服务器临时文件
-    await ssh.execCommand(`rm -rf ${remoteTempDirEsc}`);
-
-    // 5. 按保留策略清理 OBS 旧备份
-    const retentionCount = envConfig.backupRetentionCount || 1;
-    await cleanOldOBSBackups(obsClient, envConfig.backupPrefix, retentionCount, logger);
-
-  } catch (error) {
-    // 清理服务器临时文件
-    try { await ssh.execCommand(`rm -rf ${remoteTempDirEsc}`); } catch { /* 忽略 */ }
-    logger.logBackup(`obs://${obsClient.bucket}/${backupFilename}`, false);
-    console.warn(`⚠️  OBS 备份上传失败: ${error.message}`);
-    // 备份失败不阻断部署主流程
-  }
-}
-
-/**
- * 清理 OBS 上旧的备份文件，保留最新 N 个
- * @param {OBSClient} obsClient
- * @param {string} prefix - 备份前缀
- * @param {number} retentionCount - 保留数量
- * @param {DeployLogger} logger
- */
-async function cleanOldOBSBackups(obsClient, prefix, retentionCount, logger) {
-  try {
-    const objects = await obsClient.listObjects(prefix);
-    if (objects.length <= retentionCount) return;
-
-    // 按 lastModified 降序排列，删除多余的
-    objects.sort((a, b) => b.lastModified - a.lastModified);
-    const toDelete = objects.slice(retentionCount);
-
-    for (const obj of toDelete) {
-      // 从完整 key 中移除 uploadDir 前缀，获取相对 key
-      const relKey = obsClient.uploadDir
-        ? obj.key.substring(obsClient.uploadDir.length + 1)
-        : obj.key;
-      await obsClient.deleteObject(relKey);
-      console.log(`  🗑️ 删除旧 OBS 备份: ${obj.key}`);
-    }
-    if (toDelete.length > 0) {
-      console.log(`✅ OBS 旧备份清理完成（删除 ${toDelete.length} 个，保留 ${retentionCount} 个）`);
-      logger.log('INFO', 'OBS 备份清理', `删除了 ${toDelete.length} 个旧备份`);
-    }
-  } catch (error) {
-    console.warn('⚠️ OBS 旧备份清理失败:', error.message);
-  }
-}
-
-/**
- * SSH 到服务器从 OBS 下载构建产物并部署
- * @param {object} options
- */
-async function obsServerDeploy(options) {
-  const { ssh, envConfig, downloadUrl, logger } = options;
-  console.log('\n[步骤 6/7] 服务器从 OBS 内网拉取构建产物...');
-
-  const protectedDirs = envConfig.protectedDirs || [];
-  const tmpDeployDir = `${envConfig.backupDir}/deploy-obs-tmp`;
-  const tmpDirEsc = shellEscape(tmpDeployDir);
-  const deployDirEsc = shellEscape(envConfig.deployDir);
-  const remoteZipPath = `${tmpDeployDir}/build.tar.gz`;
-  const remoteZipEsc = shellEscape(remoteZipPath);
-
-  // 准备临时目录
-  await ssh.execCommand(`rm -rf ${tmpDirEsc} && mkdir -p ${tmpDirEsc}`);
-  await ssh.execCommand(`mkdir -p ${deployDirEsc}`);
-  console.log('✅ 临时部署目录已就绪');
-
-  const startTime = Date.now();
-
-  try {
-    // 服务器 curl 下载（内网）
-    console.log('  服务器下载中（curl）...');
-    await ssh.execCommand(`curl -sL -o ${remoteZipEsc} "${downloadUrl}"`);
-    const downloadDuration = Math.round((Date.now() - startTime) / 1000);
-    console.log(`✅ OBS 拉取完成 (${downloadDuration}s)`);
-    logger.logUpload('OBS', envConfig.deployDir, 0, downloadDuration, true);
-
-    // 解压到临时目录
-    console.log('\n[步骤 7/7] 解压构建产物 + 原子替换...');
-    await ssh.execCommand(`tar -xf ${remoteZipEsc} -C ${tmpDirEsc}`);
-    console.log('✅ 解压完成');
-
-    // 删除远程压缩包
-    await ssh.execCommand(`rm -f ${remoteZipEsc}`);
-
-    // 原子替换
-    await swapDeployDir({ ssh, envConfig, tmpDeployDir, protectedDirs });
-    console.log('✅ 部署目录已切换（零空窗期）');
-    logger.logDeploy(envConfig.deployDir, true);
-
-  } catch (error) {
-    // 清理远程临时目录
-    try { await ssh.execCommand(`rm -rf ${tmpDirEsc}`); } catch { /* 忽略 */ }
-    throw new Error(`OBS 服务器部署失败: ${error.message}`);
-  }
-}
-
-/**
- * OBS 中转部署模式（主函数）
- *
- * 流程:
- *   1. 备份现有部署到 OBS
- *   2. 压缩本地构建产物
- *   3. 上传压缩包到 OBS（公网）
- *   4. 生成预签名下载 URL（内网）
- *   5. SSH 服务器 curl 下载（内网）→ 解压 → 原子替换
- *   6. 清理本地压缩包
- *
- * @param {object} options
- */
-export async function obsUploadDeploy(options) {
-  const { ssh, envConfig, buildVersion, logger, skipBackup = false } = options;
-
-  const obsClient = new OBSClient(envConfig.obsConfig);
-  const obsObjectKey = `${envConfig.backupPrefix}-${buildVersion}.tar.gz`;
-  const localZipFile = `dist-${buildVersion}.tar.gz`;
-
-  try {
-    // ====== A. 备份现有部署到 OBS ======
-    if (!skipBackup) {
-      await backupToOBS({ ssh, envConfig, buildVersion, obsClient, logger });
-    } else {
-      console.log('  (跳过备份，前面策略已创建)');
-    }
-
-    // ====== B. 压缩本地构建产物 ======
-    await compressBuild(localZipFile, logger);
-
-    // ====== C. 上传压缩包到 OBS（公网） ======
-    console.log('\n[步骤 5/7] 上传构建产物到 OBS...');
-    const obsResult = await obsClient.uploadFile(localZipFile, obsObjectKey);
-    const stats = fs.statSync(localZipFile);
-    logger.logOBS('上传', obsResult.bucket, obsResult.key, true);
-
-    // ====== D. 生成预签名下载 URL（使用内网 endpoint） ======
-    const downloadUrl = obsClient.getSignedUrl(obsObjectKey, 3600, 'GET', true);
-
-    // ====== E. SSH 到服务器 → curl 下载 → 解压 → 原子替换 ======
-    await obsServerDeploy({ ssh, envConfig, downloadUrl, logger });
-
-    // ====== F. 清理本地压缩包 ======
-    try {
-      fs.unlinkSync(localZipFile);
-      console.log('✅ 本地压缩包已删除');
-    } catch (e) {
-      console.warn('⚠️ 本地压缩包删除失败:', e.message);
-    }
-
-  } catch (error) {
-    // 清理本地压缩包（保留下载给降级策略使用）
-    try { if (fs.existsSync(localZipFile)) fs.unlinkSync(localZipFile); } catch { /* 忽略 */ }
-    logger.logDeploy(envConfig.deployDir, false);
-    throw error;
-  }
-}
-
-/**
- * 获取 OBS 上的备份列表（用于回滚）
- * @param {object} envConfig - 环境配置（含 obsConfig）
- * @returns {Promise<Array>}
- */
-export async function getOBSBackupList(envConfig) {
-  const obsConfig = resolveOBSConfig(envConfig.obsConfig);
-  if (!obsConfig) return [];
-
-  try {
-    const obsClient = new OBSClient(obsConfig);
-    const objects = await obsClient.listObjects(envConfig.backupPrefix);
-
-    return objects.map(obj => {
-      const filename = obsClient.uploadDir
-        ? obj.key.substring(obsClient.uploadDir.length + 1)
-        : obj.key;
-      const parsed = parseBackupFilename(filename);
-      return {
-        file: obj.key,
-        filename,
-        prefix: parsed?.prefix,
-        version: parsed?.version || filename.replace(/\.tar\.gz$/, ''),
-        mtime: obj.lastModified,
-        size: obj.size,
-        isServer: false,
-        isOBS: true
-      };
-    });
-  } catch (error) {
-    console.warn('⚠️ 获取 OBS 备份列表失败:', error.message);
-    return [];
-  }
-}
-
 // ====== Git 中转部署（通过项目的 release 分支） ======
 
 /**
@@ -996,7 +708,7 @@ export async function deployToServer(options) {
     transferMode: cliTransferMode  // CLI --transfer 参数
   } = options;
 
-  // envConfig 可能在 OBS 策略中被合并环境变量，因此从 options 动态读取
+  // envConfig 可能被策略合并环境变量，因此从 options 动态读取
   let envConfig = options.envConfig;
 
   if (!skipBuild) {
@@ -1011,13 +723,6 @@ export async function deployToServer(options) {
   // 优先级: CLI --transfer > 配置 transferMode > 自动检测
   const configuredMode = cliTransferMode || envConfig.transferMode || 'auto';
 
-  // 检查是否配置了 OBS（配置文件 + 环境变量合并）
-  const resolvedOBSConfig = resolveOBSConfig(envConfig.obsConfig);
-  const hasOBSConfig = !!(resolvedOBSConfig && resolvedOBSConfig.bucket);
-  if (resolvedOBSConfig) {
-    envConfig = { ...envConfig, obsConfig: resolvedOBSConfig };
-  }
-
   // 检查是否配置了 Git Release
   const hasGitConfig = !!envConfig.gitRelease;
 
@@ -1027,9 +732,6 @@ export async function deployToServer(options) {
   if (configuredMode === 'git') {
     strategies = ['git', 'sftp'];
     console.log('\n📌 传输模式: Git 中转部署（显式指定）');
-  } else if (configuredMode === 'obs') {
-    strategies = ['obs', 'sftp'];
-    console.log('\n📌 传输模式: OBS 中转部署（显式指定）');
   } else if (configuredMode === 'pipe') {
     strategies = ['pipe', 'sftp'];
     console.log('\n📌 传输模式: tar + gzip 管道流（显式指定）');
@@ -1065,20 +767,6 @@ export async function deployToServer(options) {
           console.log(`\n⚠️  Git 中转失败 (${gitError.message})，降级...`);
           logger.log('WARN', '传输降级', `Git 失败: ${gitError.message}`);
           try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-git-tmp')}`); } catch { /* 忽略 */ }
-          continue;
-        }
-      }
-
-      if (strategy === 'obs') {
-        try {
-          await obsUploadDeploy({ ssh, envConfig, buildVersion, logger, skipBackup: backupDone });
-          finalMode = 'obs';
-          break;
-        } catch (obsError) {
-          backupDone = true;
-          console.log(`\n⚠️  OBS 中转失败 (${obsError.message})，降级...`);
-          logger.log('WARN', '传输降级', `OBS 失败: ${obsError.message}`);
-          try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-obs-tmp')}`); } catch { /* 忽略 */ }
           continue;
         }
       }
@@ -1133,11 +821,9 @@ export async function deployToServer(options) {
       throw new Error('所有传输模式均失败');
     }
 
-    // 下载线上备份到本地（OBS/Git 模式下跳过，备份已在远端）
-    if (enableBackupDownload && localBackupDir && finalMode !== 'obs' && finalMode !== 'git') {
+    // 下载线上备份到本地（Git 模式下跳过，备份已在远端）
+    if (enableBackupDownload && localBackupDir && finalMode !== 'git') {
       await downloadBackup({ ssh, envConfig, buildVersion, localBackupDir, logger });
-    } else if (finalMode === 'obs') {
-      console.log('\n📌 OBS 模式：备份已存储在 OBS，跳过本地下载');
     } else if (finalMode === 'git') {
       console.log('\n📌 Git 模式：构建产物已存储在 Git Release 仓库，跳过本地下载');
     }
@@ -1156,7 +842,6 @@ export async function deployToServer(options) {
     console.log(`地址: ${envConfig.deployUrl}`);
     const modeNames = {
       git: 'Git 中转部署',
-      obs: 'OBS 中转部署',
       pipe: 'tar + gzip 管道流直传',
       sftp: 'SFTP 上传'
     };
@@ -1326,7 +1011,6 @@ export async function rollbackDeployment(options) {
 }
 
 export default {
-  pipeUploadDeploy,
   gitUploadDeploy,
   buildProject,
   verifyBuildOutput,

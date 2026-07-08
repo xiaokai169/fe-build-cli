@@ -13,8 +13,6 @@ import os from 'node:os';
 import { execSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import SSHClient from './ssh-client.js';
-import { OBSClient } from './obs-client.js';
-import { resolveOBSConfig } from './deploy-core.js';
 import { checkUncommittedChanges, getCurrentBranch } from './git-branch.js';
 
 /**
@@ -67,15 +65,7 @@ export async function runPreflightChecks(options) {
       const checks = [
         checkRemoteDiskSpace(ssh, envConfig),
         checkRemoteDirPermissions(ssh, envConfig),
-
-
       ];
-
-      // 检查 OBS 连接（如果配置了 OBS）
-      const resolvedOBS = resolveOBSConfig(envConfig.obsConfig);
-      if (resolvedOBS) {
-        checks.push(checkOBSConnection(resolvedOBS));
-      }
 
       const remoteResults = await Promise.all(checks);
       results.push(...remoteResults);
@@ -307,28 +297,6 @@ function checkLocalSsh() {
       name: '本地 SSH 命令',
       status: 'warn',
       message: 'ssh 命令不可用，将降级为 SFTP 模式'
-    };
-  }
-}
-
-/**
- * 检查 OBS 连接
- */
-async function checkOBSConnection(obsConfig) {
-  try {
-    const obsClient = new OBSClient(obsConfig);
-    // 尝试列出对象来验证连接
-    await obsClient.listObjects('');
-    return {
-      name: 'OBS 连接',
-      status: 'pass',
-      message: `桶: ${obsConfig.bucket}, Endpoint: ${obsConfig.endpoint}`
-    };
-  } catch (error) {
-    return {
-      name: 'OBS 连接',
-      status: 'warn',
-      message: `连接失败: ${error.message}（不影响非 OBS 部署）`
     };
   }
 }

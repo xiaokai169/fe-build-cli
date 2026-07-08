@@ -13,15 +13,6 @@ export function isWindows(): boolean;
 export function devNull(): string;
 
 // ====== 配置 ======
-export interface OBSConfig {
-  bucket: string;
-  endpoint: string;
-  internalEndpoint?: string;
-  accessKeyId: string;
-  secretAccessKey: string;
-  uploadDir?: string;
-}
-
 export interface ServerConfig {
   sshHost: string;
   sshUser: string;
@@ -35,9 +26,8 @@ export interface ServerConfig {
   buildCommand?: string;
   protectedDirs?: string[];
   backupRetentionCount?: number;
-  transferMode?: 'pipe' | 'sftp' | 'obs' | 'git';
+  transferMode?: 'pipe' | 'sftp' | 'git';
   gitRelease?: { branch?: string };
-  obsConfig?: OBSConfig;
 }
 
 export interface FeBuildConfig {
@@ -67,15 +57,6 @@ export class SSHClient {
   disconnect(): Promise<void>;
 }
 
-// ====== OBS 客户端 ======
-export class OBSClient {
-  constructor(obsConfig: OBSConfig);
-  uploadFile(localFilePath: string, objectKey: string): Promise<{ key: string; bucket: string }>;
-  getSignedUrl(objectKey: string, expires?: number, method?: 'GET' | 'PUT', useInternal?: boolean): string;
-  listObjects(prefix: string): Promise<Array<{ key: string; lastModified: Date; size: number }>>;
-  deleteObject(objectKey: string): Promise<void>;
-}
-
 // ====== Git 信息查询 ======
 export function getCurrentBranch(): string;
 export function getGitSha(): string;
@@ -89,15 +70,13 @@ export function executeSimpleFlow(): { success: boolean; currentBranch: string; 
 // ====== 部署核心 ======
 export function getServerBackupList(ssh: SSHClient, envConfig: ServerConfig): Promise<BackupFile[]>;
 export function getLocalBackupList(localBackupDir: string, backupPrefix: string): BackupFile[];
-export function getOBSBackupList(envConfig: ServerConfig): Promise<BackupFile[]>;
 export function rollbackFromLocal(options: RollbackLocalOpts): Promise<string>;
 export function buildProject(envConfig: ServerConfig, buildVersion: string, logger: DeployLogger): void;
 export function verifyBuildOutput(skipBuild: boolean, logger: DeployLogger): void;
 export function compressBuild(localZipFile: string, logger: DeployLogger): Promise<void>;
 export function backupExistingDeployment(options: BackupOpts): Promise<void>;
 export function pipeUploadDeploy(options: PipeDeployOpts): Promise<void>;
-export function obsUploadDeploy(options: ObsDeployOpts): Promise<void>;
-export function gitUploadDeploy(options: ObsDeployOpts): Promise<void>;
+export function gitUploadDeploy(options: GitDeployOpts): Promise<void>;
 export function uploadBuild(options: UploadOpts): Promise<void>;
 export function deployAndExtract(options: ExtractOpts): Promise<void>;
 export function cleanupFiles(options: CleanupOpts): Promise<void>;
@@ -113,10 +92,9 @@ export interface BackupFile {
   mtime?: Date;
   size?: number;
   isServer: boolean;
-  isOBS?: boolean;
 }
 
-export interface ObsDeployOpts {
+export interface GitDeployOpts {
   ssh: SSHClient;
   envConfig: ServerConfig;
   buildVersion: string;
@@ -248,7 +226,6 @@ export class DeployLogger {
   logBackup(backupFile: string, success: boolean, isDownload?: boolean): void;
   logDeploy(deployDir: string, success: boolean): void;
   logDingTalk(success: boolean, message?: string): void;
-  logOBS(operation: string, bucket: string, objectKey: string, success: boolean): void;
   saveLog(): string;
   saveErrorLog(): string;
   getSummary(): LogSummary;
