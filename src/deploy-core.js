@@ -522,6 +522,21 @@ export async function downloadBackup(options) {
   }
 }
 
+/**
+ * 将 HTTPS Git 地址转为 SSH 格式（服务器无 HTTPS 认证时自动使用）
+ * 仅处理 github.com / gitlab.com / gitee.com，其他原样返回
+ */
+function toSSHUrl(url) {
+  // 已经是 SSH 格式
+  if (url.startsWith('git@')) return url;
+  // 尝试转换常见平台
+  const match = url.match(/^https?:\/\/([^/]+)\/(.+?)(\.git)?$/);
+  if (match && ['github.com', 'gitlab.com', 'gitee.com'].includes(match[1])) {
+    return `git@${match[1]}:${match[2]}.git`;
+  }
+  return url;
+}
+
 // ====== Git 中转部署（通过项目的 release 分支） ======
 
 /**
@@ -547,8 +562,6 @@ export async function downloadBackup(options) {
 export async function gitUploadDeploy(options) {
   const { ssh, envConfig, buildVersion, logger, skipBackup = false } = options;
   const releaseBranch = envConfig.gitRelease?.branch || 'release';
-  // 服务器拉取用的仓库地址：优先用配置的 remote，否则用本地 origin（支持 SSH/HTTPS 混用场景）
-  const serverRemote = envConfig.gitRelease?.remote;  // 可选，不配置就用 originUrl
 
   // ====== A. 备份当前部署 ======
   if (!skipBackup) {
@@ -635,7 +648,7 @@ export async function gitUploadDeploy(options) {
       `test -d ${serverGitDirEsc}/.git && echo 'EXISTS' || echo 'NOT_FOUND'`
     );
 
-    const cloneUrl = serverRemote || originUrl;
+    const cloneUrl = envConfig.gitRelease?.remote || toSSHUrl(originUrl);
 
     if (checkResult.includes('NOT_FOUND')) {
       console.log('  首次部署，服务器 clone 仓库...');
@@ -644,12 +657,10 @@ export async function gitUploadDeploy(options) {
         `cd ${serverGitDirEsc} && git clone --depth 1 --single-branch --branch "${releaseBranch}" -- "${cloneUrl}" .`
       );
     } else {
-      // 更新到最新（如果配置了 serverRemote，先更新 origin URL）
-      if (serverRemote) {
-        await ssh.execCommand(
-          `cd ${serverGitDirEsc} && git remote set-url origin "${serverRemote}"`
-        );
-      }
+      // 更新到最新（更新 origin URL 为 SSH 格式，确保后续 fetch 可用）
+      await ssh.execCommand(
+        `cd ${serverGitDirEsc} && git remote set-url origin "${cloneUrl}"`
+      );
       await ssh.execCommand(
         `cd ${serverGitDirEsc} && git fetch origin "${releaseBranch}" --depth 1 && ` +
         `git checkout "${releaseBranch}" && git reset --hard "origin/${releaseBranch}"`

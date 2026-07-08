@@ -186,7 +186,7 @@ export default {
       // 在同一仓库创建独立 release 分支，存放构建产物压缩包
       // gitRelease: {
       //   branch: 'release',   // 分支名，默认 'release'
-      //   remote: 'git@github.com:user/repo.git'  // 服务器拉取地址（可选，默认用本地 origin），支持 SSH
+      //   remote: 'git@github.com:user/repo.git'  // 服务器拉取地址（可选，默认自动将 origin HTTPS 转 SSH）
       // },
     },
 
