@@ -476,8 +476,8 @@ export async function rsyncUploadDeploy(options) {
   const remoteTarget = `${envConfig.sshUser}@${envConfig.sshHost}:${tmpDeployDir}`;
 
   // 构建 SSH 命令（作为 rsync -e 的参数）
-  // LogLevel=ERROR 抑制远程 MOTD/banner，避免污染 rsync 协议流导致退出码 12
-  const sshCmd = `ssh -i ${keyPath} -p ${sshPort} -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o BatchMode=yes -o LogLevel=ERROR`;
+  // -q + LogLevel=QUIET 强制静默所有 SSH 输出，防止 MOTD/banner/.bashrc 混入 rsync 协议流
+  const sshCmd = `ssh -q -i ${keyPath} -p ${sshPort} -o StrictHostKeyChecking=no -o ConnectTimeout=30 -o BatchMode=yes -o LogLevel=QUIET`;
 
   const rsyncArgs = [
     '-az',                  // 归档 + 压缩
