@@ -643,28 +643,79 @@ export async function gitUploadDeploy(options) {
     const serverGitDir = `${envConfig.backupDir}/git-release`;
     const serverGitDirEsc = shellEscape(serverGitDir);
 
+    // 🔍 诊断日志：URL 来源
+    const hasExplicitRemote = !!envConfig.gitRelease?.remote;
+    console.log(`  📋 gitRelease.remote 配置: ${hasExplicitRemote ? envConfig.gitRelease.remote : '(未配置)'}`);
+    console.log(`  📋 本地 origin URL: ${originUrl}`);
+    if (hasExplicitRemote) {
+      console.log(`  📋 使用配置的 remote → ${envConfig.gitRelease.remote}`);
+    } else {
+      console.log(`  📋 toSSHUrl 转换结果: ${originUrl} → ${toSSHUrl(originUrl)}`);
+      console.log(`  📋 转换后协议: ${toSSHUrl(originUrl).startsWith('git@') ? 'SSH' : 'HTTPS（⚠️ 未识别平台，SSH key 不会生效）'}`);
+    }
+
+    const cloneUrl = envConfig.gitRelease?.remote || toSSHUrl(originUrl);
+    console.log(`  📋 最终 clone URL: ${cloneUrl}`);
+
     // 检查服务器是否已有仓库
     const checkResult = await ssh.execCommand(
       `test -d ${serverGitDirEsc}/.git && echo 'EXISTS' || echo 'NOT_FOUND'`
     );
-
-    const cloneUrl = envConfig.gitRelease?.remote || toSSHUrl(originUrl);
+    console.log(`  📋 服务器 .git 目录: ${checkResult.includes('EXISTS') ? '存在 → 走 fetch 更新' : '不存在 → 走 clone 初始化'}`);
 
     if (checkResult.includes('NOT_FOUND')) {
       console.log('  首次部署，服务器 clone 仓库...');
+      console.log(`  📋 执行: cd ${serverGitDir} && git clone --depth 1 --single-branch --branch "${releaseBranch}" -- ${cloneUrl} .`);
       await ssh.execCommand(`mkdir -p ${serverGitDirEsc}`);
-      await ssh.execCommand(
-        `cd ${serverGitDirEsc} && git clone --depth 1 --single-branch --branch "${releaseBranch}" -- "${cloneUrl}" .`
-      );
+      try {
+        await ssh.execCommand(
+          `cd ${serverGitDirEsc} && git clone --depth 1 --single-branch --branch "${releaseBranch}" -- "${cloneUrl}" .`
+        );
+        console.log('  ✅ clone 成功');
+      } catch (cloneErr) {
+        console.error(`  ❌ clone 失败: ${cloneErr.message}`);
+        // 打印服务器 SSH/密钥状态帮助排查
+        try {
+          const keys = await ssh.execCommand('ls -la ~/.ssh/ 2>/dev/null || echo "(无 .ssh 目录)"');
+          console.log(`  📋 服务器 ~/.ssh 目录:\n${keys.trim()}`);
+        } catch { /* 忽略 */ }
+        try {
+          const sshTest = await ssh.execCommand('ssh -o StrictHostKeyChecking=no -T git@github.com 2>&1 || true');
+          console.log(`  📋 GitHub SSH 认证测试:\n${sshTest.trim()}`);
+        } catch { /* 忽略 */ }
+        throw cloneErr;
+      }
     } else {
-      // 更新到最新（更新 origin URL 为 SSH 格式，确保后续 fetch 可用）
-      await ssh.execCommand(
-        `cd ${serverGitDirEsc} && git remote set-url origin "${cloneUrl}"`
-      );
-      await ssh.execCommand(
-        `cd ${serverGitDirEsc} && git fetch origin "${releaseBranch}" --depth 1 && ` +
-        `git checkout "${releaseBranch}" && git reset --hard "origin/${releaseBranch}"`
-      );
+      console.log('  已有仓库，拉取更新...');
+      try {
+        await ssh.execCommand(
+          `cd ${serverGitDirEsc} && git remote set-url origin "${cloneUrl}"`
+        );
+        console.log(`  ✅ remote set-url 完成 ( → ${cloneUrl} )`);
+      } catch (remoteErr) {
+        console.error(`  ❌ remote set-url 失败: ${remoteErr.message}`);
+        throw remoteErr;
+      }
+      console.log(`  📋 执行: cd ${serverGitDir} && git fetch origin "${releaseBranch}" --depth 1`);
+      try {
+        await ssh.execCommand(
+          `cd ${serverGitDirEsc} && git fetch origin "${releaseBranch}" --depth 1 && ` +
+          `git checkout "${releaseBranch}" && git reset --hard "origin/${releaseBranch}"`
+        );
+        console.log('  ✅ fetch + checkout 完成');
+      } catch (fetchErr) {
+        console.error(`  ❌ fetch 失败: ${fetchErr.message}`);
+        // 打印服务器当前状态帮助排查
+        try {
+          const remotes = await ssh.execCommand(`cd ${serverGitDirEsc} && git remote -v 2>/dev/null || echo "(无法获取)"`);
+          console.log(`  📋 服务器 git remote:\n${remotes.trim()}`);
+        } catch { /* 忽略 */ }
+        try {
+          const branches = await ssh.execCommand(`cd ${serverGitDirEsc} && git branch -a 2>/dev/null || echo "(无法获取)"`);
+          console.log(`  📋 服务器 git branch -a:\n${branches.trim()}`);
+        } catch { /* 忽略 */ }
+        throw fetchErr;
+      }
     }
     console.log('✅ 服务器拉取完成');
 
