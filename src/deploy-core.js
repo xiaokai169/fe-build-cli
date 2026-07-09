@@ -657,13 +657,19 @@ export async function gitUploadDeploy(options) {
     const cloneUrl = envConfig.gitRelease?.remote || toSSHUrl(originUrl);
     console.log(`  📋 最终 clone URL: ${cloneUrl}`);
 
-    // 检查服务器是否已有仓库
-    const checkResult = await ssh.execCommand(
-      `test -d ${serverGitDirEsc}/.git && echo 'EXISTS' || echo 'NOT_FOUND'`
-    );
-    console.log(`  📋 服务器 .git 目录: ${checkResult.includes('EXISTS') ? '存在 → 走 fetch 更新' : '不存在 → 走 clone 初始化'}`);
+    // 检查服务器是否已有仓库（不仅要看 .git 目录，还要验证是有效的 git 仓库）
+    let repoValid = false;
+    try {
+      const validCheck = await ssh.execCommand(
+        `cd ${serverGitDirEsc} 2>/dev/null && git rev-parse --is-inside-work-tree 2>/dev/null`
+      );
+      repoValid = validCheck.includes('true');
+    } catch {
+      repoValid = false;
+    }
+    console.log(`  📋 服务器 Git 仓库状态: ${repoValid ? '有效 → 走 fetch 更新' : '无效/不存在 → 走 clone 初始化'}`);
 
-    if (checkResult.includes('NOT_FOUND')) {
+    if (!repoValid) {
       console.log('  首次部署，服务器 clone 仓库...');
       console.log(`  📋 执行: cd ${serverGitDir} && git clone --depth 1 --single-branch --branch "${releaseBranch}" -- ${cloneUrl} .`);
       await ssh.execCommand(`mkdir -p ${serverGitDirEsc}`);
