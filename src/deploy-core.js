@@ -1,5 +1,6 @@
 import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import zlib from 'node:zlib';
@@ -574,11 +575,11 @@ export async function gitUploadDeploy(options) {
   const localZipFile = `dist-${buildVersion}.tar.gz`;
   await compressBuild(localZipFile, logger);
 
-  // ====== C. 本地推送 release 分支 ======
-  console.log(`\n[步骤 5/7] 推送构建产物到 ${releaseBranch} 分支...`);
+  // ====== C. 使用 git worktree 推送 release 分支（不切换当前分支） ======
+  console.log(`\n[步骤 5/7] 推送构建产物到 ${releaseBranch} 分支（worktree 模式）...`);
 
   const zipBaseName = path.basename(localZipFile);
-  let currentBranch = '';
+  const worktreePath = path.join(os.tmpdir(), `fe-build-release-${Date.now()}`);
 
   try {
     // 获取 origin URL（服务器拉取时需要）
@@ -589,25 +590,7 @@ export async function gitUploadDeploy(options) {
       throw new Error('无法获取 git remote origin，请确认已配置 git 远程仓库');
     }
 
-    // 记住当前分支
-    currentBranch = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf-8' }).trim();
-
-    // ====== 保护未提交的改动: 自动 stash ======
-    let stashCreated = false;
-    try {
-      // 检查是否有任何未提交的改动（包括 untracked）
-      const statusCheck = execSync('git status --porcelain', { encoding: 'utf-8' }).trim();
-      if (statusCheck) {
-        console.log('  📦 检测到未提交改动，自动 stash 保护...');
-        execSync('git stash push -u -m "fe-build-cli: auto stash before deploy"', { stdio: 'inherit' });
-        stashCreated = true;
-        console.log('  ✅ 未提交改动已 stash，部署完成后自动恢复');
-      }
-    } catch (e) {
-      console.warn('  ⚠️  stash 失败，部署将继续但未提交改动可能丢失');
-    }
-
-    // 创建或切换到 release 分支
+    // 检查 release 分支是否存在
     let releaseExists = false;
     try {
       execSync(`git rev-parse --verify "${releaseBranch}"`, { stdio: 'pipe' });
@@ -617,26 +600,30 @@ export async function gitUploadDeploy(options) {
     }
 
     if (releaseExists) {
-      execSync(`git checkout -f "${releaseBranch}"`, { stdio: 'pipe' });
-      // 清空分支内容
-      execSync('git rm -rf . 2>nul || git rm -rf . 2>/dev/null || true', { stdio: 'pipe' });
+      // 基于已有 release 分支创建 worktree
+      execSync(`git worktree add "${worktreePath}" "${releaseBranch}"`, { stdio: 'pipe' });
+      // 清空 worktree，但保留 .git
+      execSync(`cd "${worktreePath}" && git rm -rf . 2>/dev/null || true`, { stdio: 'pipe' });
     } else {
-      // 首次：创建无历史的 orphan 分支
+      // 首次：创建 orphan 分支，再建 worktree
       execSync(`git checkout --orphan "${releaseBranch}"`, { stdio: 'pipe' });
-      execSync('git rm -rf --cached . 2>nul || git rm -rf --cached . 2>/dev/null || true', { stdio: 'pipe' });
+      execSync('git rm -rf --cached . 2>/dev/null || true', { stdio: 'pipe' });
+      execSync(`git commit --allow-empty -m "init: release branch"`, { stdio: 'pipe' });
+      // 切回原分支（此时工作区是干净的 orphan，直接切回去就行）
+      execSync(`git checkout -`, { stdio: 'pipe' });
+      execSync(`git worktree add "${worktreePath}" "${releaseBranch}"`, { stdio: 'pipe' });
       console.log(`  已创建独立的 ${releaseBranch} 分支（orphan，与源码历史隔离）`);
     }
 
-    // 复制压缩包并提交
-    const localCopy = path.join(process.cwd(), zipBaseName);
-    fs.copyFileSync(localZipFile, localCopy);
+    // 复制压缩包到 worktree 并提交
+    const worktreeZip = path.join(worktreePath, zipBaseName);
+    fs.copyFileSync(localZipFile, worktreeZip);
 
-    execSync(`git add -f "${zipBaseName}"`, { stdio: 'pipe' });
+    execSync('git add -f .', { stdio: 'pipe', cwd: worktreePath });
     try {
       console.log(`  git commit -m "deploy: ${buildVersion}"`);
-      execSync(`git commit -m "deploy: ${buildVersion}"`, { stdio: 'inherit' });
+      execSync(`git commit -m "deploy: ${buildVersion}"`, { stdio: 'inherit', cwd: worktreePath });
     } catch (commitErr) {
-      // 空提交（内容没变），跳过
       if (commitErr.message.includes('nothing to commit')) {
         console.log('  内容无变化，跳过提交');
       } else {
@@ -644,26 +631,13 @@ export async function gitUploadDeploy(options) {
       }
     }
     console.log(`  git push origin ${releaseBranch} ...`);
-    execSync(`git push origin "${releaseBranch}"`, { stdio: 'inherit' });
+    execSync(`git push origin "${releaseBranch}"`, { stdio: 'inherit', cwd: worktreePath });
     console.log(`✅ ${releaseBranch} 分支推送完成`);
 
-    // ====== D. 切回原分支 ======
-    // -f: release 是 orphan 分支，工作区还有源码文件，需强制覆盖
-    execSync(`git checkout -f "${currentBranch}"`, { stdio: 'pipe' });
-    // 清理本地残留文件
-    try { if (fs.existsSync(localCopy)) fs.unlinkSync(localCopy); } catch { /* 忽略 */ }
-
-    // ====== 恢复 stash（如果有） ======
-    if (stashCreated) {
-      try {
-        console.log('  📦 恢复之前 stash 的未提交改动...');
-        execSync('git stash pop', { stdio: 'inherit' });
-        console.log('  ✅ stash 已恢复');
-      } catch (e) {
-        console.warn(`  ⚠️  stash 恢复失败（可能被部署残留文件冲突），请手动执行 git stash pop`);
-        console.warn(`     stash 列表: 执行 git stash list 查看`);
-      }
-    }
+    // 清理 worktree
+    try { execSync(`git worktree remove "${worktreePath}"`, { stdio: 'pipe' }); } catch { /* 忽略 */ }
+    // 清理本地压缩包
+    try { if (fs.existsSync(localZipFile)) fs.unlinkSync(localZipFile); } catch { /* 忽略 */ }
 
     // ====== E. 服务器 Git 拉取 ======
     console.log(`\n[步骤 6/7] 服务器拉取构建产物（Git）...`);
@@ -778,18 +752,8 @@ export async function gitUploadDeploy(options) {
     );
 
   } catch (error) {
-    // 尝试切回原分支
-    if (currentBranch) {
-      try { execSync(`git checkout -f "${currentBranch}"`, { stdio: 'pipe' }); } catch { /* ignore */ }
-    }
-    // 尝试恢复 stash（即使出错也要恢复未提交的改动）
-    if (stashCreated) {
-      try {
-        console.log('  📦 部署失败，恢复 stash 的未提交改动...');
-        execSync('git stash pop', { stdio: 'inherit' });
-        console.log('  ✅ stash 已恢复');
-      } catch { /* stash 恢复失败时给出提示 */ }
-    }
+    // 清理 worktree（如果还存在）
+    try { execSync(`git worktree remove --force "${worktreePath}" 2>/dev/null || true`, { stdio: 'pipe' }); } catch { /* ignore */ }
     // 清理本地文件
     try { if (fs.existsSync(localZipFile)) fs.unlinkSync(localZipFile); } catch { /* 忽略 */ }
     try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-git-tmp')}`); } catch { /* 忽略 */ }
