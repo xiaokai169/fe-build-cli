@@ -79,37 +79,38 @@ export async function sendDeploySuccessNotification(webhookUrl, options) {
     msgtype: 'markdown',
     markdown: {
       title,
-      text: `
-## 🚀 ${keyword}成功通知
-
-**环境**: ${environment}
-**状态**: ✅ 成功
-**时间**: ${timeStr}
+      text: `# 🚀 ${keyword}成功通知
 
 ---
 
-### ${keyword}详情
-
-构建版本: ${buildVersion}
-发布分支: ${branch}
-发布模式: ${deployModeText}
-服务器: ${serverHost}
-${duration ? `${keyword}耗时: ${duration}` : ''}
+> **环境:** ${environment} &nbsp;&nbsp; **状态:** ✅ 成功 &nbsp;&nbsp; **时间:** ${timeStr}
 
 ---
 
-### 本次修改内容
+### 📋 ${keyword}详情
 
-${commitMessage || '无提交信息'}
+| 项目 | 内容 |
+| --- | --- |
+| 构建版本 | \`${buildVersion}\` |
+| 发布分支 | ${branch} |
+| 发布模式 | ${deployModeText} |
+| 服务器 | ${serverHost}${duration ? ` |
+| 部署耗时 | ${duration}` : ''}
 
 ---
 
-### 访问地址
+### 📝 本次修改摘要
 
-[${deployUrl}](${deployUrl})
+> ${commitMessage || '无提交信息'}
 
-> ${keyword}完成，请及时验证功能是否正常。
-      `.trim()
+---
+
+### 🔗 访问地址
+
+###### [${deployUrl}](${deployUrl})
+
+---
+> ${keyword}完成，请及时验证功能是否正常。`
     }
   };
 
@@ -156,35 +157,36 @@ export async function sendDeployFailureNotification(webhookUrl, options) {
     msgtype: 'markdown',
     markdown: {
       title,
-      text: `
-## ❌ ${keyword}失败通知
-
-**环境**: ${environment}
-**状态**: ❌ 失败
-**时间**: ${timeStr}
+      text: `# ❌ ${keyword}失败通知
 
 ---
 
-### 失败详情
-
-构建版本: ${buildVersion || '未完成'}
-发布分支: ${branch}
-服务器: ${serverHost}
+> **环境:** ${environment} &nbsp;&nbsp; **状态:** ❌ 失败 &nbsp;&nbsp; **时间:** ${timeStr}
 
 ---
 
-### 本次修改内容
+### 📋 失败详情
 
-${commitMessage || '无提交信息'}
+| 项目 | 内容 |
+| --- | --- |
+| 构建版本 | \`${buildVersion || '未完成'}\` |
+| 发布分支 | ${branch} |
+| 服务器 | ${serverHost} |
 
 ---
 
-### 错误信息
+### 📝 本次修改摘要
 
-${error}
+> ${commitMessage || '无提交信息'}
 
-> 请及时排查问题并重新${keyword}。
-      `.trim()
+---
+
+### ❌ 错误信息
+
+> ${error}
+
+---
+> 请及时排查问题并重新${keyword}。`
     }
   };
 
@@ -229,30 +231,25 @@ export async function sendRollbackNotification(webhookUrl, options) {
     msgtype: 'markdown',
     markdown: {
       title,
-      text: `
-## ${success ? '🔄' : '❌'} 回滚${success ? '成功' : '失败'}通知
-
-**环境**: ${environment}
-**状态**: ${success ? '✅ 成功' : '❌ 失败'}
-**时间**: ${timeStr}
+      text: `# ${success ? '🔄' : '❌'} 回滚${success ? '成功' : '失败'}通知
 
 ---
 
-### 回滚详情
-
-服务器: ${serverHost}
-备份文件: ${backupFile}
+> **环境:** ${environment} &nbsp;&nbsp; **状态:** ${success ? '✅ 成功' : '❌ 失败'} &nbsp;&nbsp; **时间:** ${timeStr}
 
 ---
 
-${success ? `### 访问地址
+### 📋 回滚详情
 
-[${deployUrl}](${deployUrl})` : `### 错误信息
+| 项目 | 内容 |
+| --- | --- |
+| 服务器 | ${serverHost} |
+| 备份文件 | \`${backupFile}\` |
+${success ? `| 访问地址 | [${deployUrl}](${deployUrl}) |` : ''}
 
-回滚失败，请检查备份文件是否存在或手动处理。`}
+---
 
-> ${success ? '回滚完成，请验证功能是否正常。' : '回滚失败，请手动处理。'}（${keyword}系统）
-      `.trim()
+> ${success ? '回滚完成，请验证功能是否正常。' : '回滚失败，请手动处理。'}`
     }
   };
 
