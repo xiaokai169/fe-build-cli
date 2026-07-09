@@ -592,6 +592,21 @@ export async function gitUploadDeploy(options) {
     // 记住当前分支
     currentBranch = execSync('git rev-parse --abbrev-ref HEAD', { encoding: 'utf-8' }).trim();
 
+    // ====== 保护未提交的改动: 自动 stash ======
+    let stashCreated = false;
+    try {
+      // 检查是否有任何未提交的改动（包括 untracked）
+      const statusCheck = execSync('git status --porcelain', { encoding: 'utf-8' }).trim();
+      if (statusCheck) {
+        console.log('  📦 检测到未提交改动，自动 stash 保护...');
+        execSync('git stash push -u -m "fe-build-cli: auto stash before deploy"', { stdio: 'inherit' });
+        stashCreated = true;
+        console.log('  ✅ 未提交改动已 stash，部署完成后自动恢复');
+      }
+    } catch (e) {
+      console.warn('  ⚠️  stash 失败，部署将继续但未提交改动可能丢失');
+    }
+
     // 创建或切换到 release 分支
     let releaseExists = false;
     try {
@@ -637,6 +652,18 @@ export async function gitUploadDeploy(options) {
     execSync(`git checkout -f "${currentBranch}"`, { stdio: 'pipe' });
     // 清理本地残留文件
     try { if (fs.existsSync(localCopy)) fs.unlinkSync(localCopy); } catch { /* 忽略 */ }
+
+    // ====== 恢复 stash（如果有） ======
+    if (stashCreated) {
+      try {
+        console.log('  📦 恢复之前 stash 的未提交改动...');
+        execSync('git stash pop', { stdio: 'inherit' });
+        console.log('  ✅ stash 已恢复');
+      } catch (e) {
+        console.warn(`  ⚠️  stash 恢复失败（可能被部署残留文件冲突），请手动执行 git stash pop`);
+        console.warn(`     stash 列表: 执行 git stash list 查看`);
+      }
+    }
 
     // ====== E. 服务器 Git 拉取 ======
     console.log(`\n[步骤 6/7] 服务器拉取构建产物（Git）...`);
@@ -754,6 +781,14 @@ export async function gitUploadDeploy(options) {
     // 尝试切回原分支
     if (currentBranch) {
       try { execSync(`git checkout -f "${currentBranch}"`, { stdio: 'pipe' }); } catch { /* ignore */ }
+    }
+    // 尝试恢复 stash（即使出错也要恢复未提交的改动）
+    if (stashCreated) {
+      try {
+        console.log('  📦 部署失败，恢复 stash 的未提交改动...');
+        execSync('git stash pop', { stdio: 'inherit' });
+        console.log('  ✅ stash 已恢复');
+      } catch { /* stash 恢复失败时给出提示 */ }
     }
     // 清理本地文件
     try { if (fs.existsSync(localZipFile)) fs.unlinkSync(localZipFile); } catch { /* 忽略 */ }
