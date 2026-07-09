@@ -590,6 +590,21 @@ export async function gitUploadDeploy(options) {
       throw new Error('无法获取 git remote origin，请确认已配置 git 远程仓库');
     }
 
+    // 清理上次可能残留的 fe-build-release-* worktree（避免 "already used by worktree" 报错）
+    try {
+      const worktreeList = execSync('git worktree list --porcelain', { encoding: 'utf-8' });
+      const staleWorktrees = worktreeList
+        .split('\n')
+        .filter(l => l.startsWith('worktree ') && l.includes('fe-build-release-'))
+        .map(l => l.replace('worktree ', '').trim());
+      for (const wt of staleWorktrees) {
+        try {
+          execSync(`git worktree remove --force "${wt}"`, { stdio: 'pipe' });
+          console.log(`  🧹 清理残留 worktree: ${wt}`);
+        } catch { /* 忽略 */ }
+      }
+    } catch { /* 忽略 */ }
+
     // 检查 release 分支是否存在
     let releaseExists = false;
     try {
