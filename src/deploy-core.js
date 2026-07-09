@@ -602,12 +602,12 @@ export async function gitUploadDeploy(options) {
     if (releaseExists) {
       // 基于已有 release 分支创建 worktree
       execSync(`git worktree add "${worktreePath}" "${releaseBranch}"`, { stdio: 'pipe' });
-      // 清空 worktree，但保留 .git
-      execSync(`cd "${worktreePath}" && git rm -rf . 2>/dev/null || true`, { stdio: 'pipe' });
+      // 清空 worktree（失败意味着已是空的，忽略即可）
+      try { execSync('git rm -rf .', { stdio: 'pipe', cwd: worktreePath }); } catch { /* 空仓库，忽略 */ }
     } else {
       // 首次：创建 orphan 分支，再建 worktree
       execSync(`git checkout --orphan "${releaseBranch}"`, { stdio: 'pipe' });
-      execSync('git rm -rf --cached . 2>/dev/null || true', { stdio: 'pipe' });
+      try { execSync('git rm -rf --cached .', { stdio: 'pipe' }); } catch { /* 忽略 */ }
       execSync(`git commit --allow-empty -m "init: release branch"`, { stdio: 'pipe' });
       // 切回原分支（此时工作区是干净的 orphan，直接切回去就行）
       execSync(`git checkout -`, { stdio: 'pipe' });
@@ -753,7 +753,7 @@ export async function gitUploadDeploy(options) {
 
   } catch (error) {
     // 清理 worktree（如果还存在）
-    try { execSync(`git worktree remove --force "${worktreePath}" 2>/dev/null || true`, { stdio: 'pipe' }); } catch { /* ignore */ }
+    try { execSync(`git worktree remove --force "${worktreePath}"`, { stdio: 'pipe' }); } catch { /* ignore */ }
     // 清理本地文件
     try { if (fs.existsSync(localZipFile)) fs.unlinkSync(localZipFile); } catch { /* 忽略 */ }
     try { await ssh.execCommand(`rm -rf ${shellEscape(envConfig.backupDir + '/deploy-git-tmp')}`); } catch { /* 忽略 */ }
