@@ -9,6 +9,12 @@
  * @returns {Promise<object>} 发送结果
  */
 export async function sendDingTalkMessage(webhookUrl, message) {
+  // 临时保存并清除代理环境变量，避免代理导致请求失败
+  const savedHttpProxy = process.env.HTTP_PROXY;
+  const savedHttpsProxy = process.env.HTTPS_PROXY;
+  delete process.env.HTTP_PROXY;
+  delete process.env.HTTPS_PROXY;
+
   try {
     const response = await fetch(webhookUrl, {
       method: 'POST',
@@ -20,6 +26,10 @@ export async function sendDingTalkMessage(webhookUrl, message) {
 
     const result = await response.json();
 
+    // 恢复代理环境变量
+    if (savedHttpProxy) process.env.HTTP_PROXY = savedHttpProxy;
+    if (savedHttpsProxy) process.env.HTTPS_PROXY = savedHttpsProxy;
+
     if (result.errcode !== 0) {
       console.error('❌ 钉钉消息发送失败:', result.errmsg);
       return { success: false, error: result.errmsg };
@@ -28,6 +38,10 @@ export async function sendDingTalkMessage(webhookUrl, message) {
     console.log('✅ 钉钉消息发送成功');
     return { success: true, data: result };
   } catch (error) {
+    // 恢复代理环境变量
+    if (savedHttpProxy) process.env.HTTP_PROXY = savedHttpProxy;
+    if (savedHttpsProxy) process.env.HTTPS_PROXY = savedHttpsProxy;
+
     console.error('❌ 钉钉消息发送失败:', error.message);
     return { success: false, error: error.message };
   }
